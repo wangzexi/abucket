@@ -834,7 +834,15 @@ async fn main() -> Result<()> {
         super_admin_key,
         multipart_dir,
     };
-    let app = Router::new()
+    let app = build_app(state, max_upload_bytes);
+    let listener = TcpListener::bind(bind).await?;
+    info!("serving quark-s3-demo at http://{bind}");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn build_app(state: AppState, max_upload_bytes: usize) -> Router {
+    Router::new()
         .route("/", any(root_handler))
         .route("/api/config", any(config_handler))
         .route("/api/help", any(help_handler))
@@ -842,11 +850,7 @@ async fn main() -> Result<()> {
         .route("/{bucket}/", any(bucket_handler))
         .route("/{bucket}/{*key}", any(object_handler))
         .layer(DefaultBodyLimit::max(max_upload_bytes))
-        .with_state(state);
-    let listener = TcpListener::bind(bind).await?;
-    info!("serving quark-s3-demo at http://{bind}");
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(state)
 }
 
 async fn root_handler(
@@ -2214,6 +2218,9 @@ fn xml_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use tower::ServiceExt;
 
     fn config_with_mounts(mounts: Vec<MountConfig>) -> ServiceConfig {
         ServiceConfig {
@@ -2231,6 +2238,35 @@ mod tests {
             enabled: true,
             options: Value::Null,
         }
+    }
+
+    fn test_state() -> AppState {
+        let db_path = std::env::temp_dir().join(format!(
+            "quark-s3-demo-test-{}-{}.sqlite",
+            std::process::id(),
+            chrono_millis()
+        ));
+        let config = load_or_init_config(&db_path).unwrap();
+        let multipart_dir = db_path.with_extension("multipart");
+        std::fs::create_dir_all(&multipart_dir).unwrap();
+        AppState {
+            quark: QuarkClient::new("dummy=1".to_string(), "0".to_string()).unwrap(),
+            bucket: "quark".to_string(),
+            config: Arc::new(RwLock::new(config)),
+            multipart_dir,
+            db_path,
+            super_admin_key: Some("admin-test-key".to_string()),
+        }
+    }
+
+    async fn response_text(response: Response) -> String {
+        String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2343,5 +2379,167 @@ mod tests {
             resources: vec!["/*".to_string()],
         });
         assert!(validate_config(&config).is_err());
+    }
+
+    #[tokio::test]
+    async fn root_route_negotiates_browser_html_and_s3_xml() {
+        let app = build_app(test_state(), 1024 * 1024);
+
+        let html_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::ACCEPT, "text/html")
+                    .header(header::USER_AGENT, "Mozilla/5.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(html_resp.status(), StatusCode::OK);
+        let html = response_text(html_resp).await;
+        assert!(html.contains("quark-s3-demo"));
+        assert!(html.contains("quark_s3_demo_key"));
+
+        let xml_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::ACCEPT, "application/xml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(xml_resp.status(), StatusCode::OK);
+        let xml = response_text(xml_resp).await;
+        assert!(xml.contains("<ListAllMyBucketsResult"));
+        assert!(xml.contains("<Name>quark</Name>"));
+    }
+
+    #[tokio::test]
+    async fn config_api_requires_admin_hashes_plain_key_and_rejects_invalid_config() {
+        let state = test_state();
+        let app = build_app(state, 1024 * 1024);
+
+        let no_auth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_auth.status(), StatusCode::UNAUTHORIZED);
+
+        let bad = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/config")
+                    .header(header::AUTHORIZATION, "Bearer admin-test-key")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"mounts":[{"mount_path":"bad","type":"quark_cookie","root_path":"/","enabled":true}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            response_text(bad)
+                .await
+                .contains("mount_path must start with /")
+        );
+
+        let good_config = r#"{
+          "mounts": [{"mount_path": "/", "type": "quark_cookie", "root_path": "/", "enabled": true}],
+          "auth": {
+            "keys": [{"name": "reader", "plain_key": "reader-test-key", "enabled": true}],
+            "rules": [{"principal": "key:reader", "actions": ["ListBucket"], "resources": ["/*"]}]
+          },
+          "cache": {"enabled": true, "max_bytes": 1048576}
+        }"#;
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/config")
+                    .header(header::AUTHORIZATION, "Bearer admin-test-key")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(good_config))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+        let put_body = response_text(put).await;
+        assert!(put_body.contains("\"ok\":true"));
+        assert!(put_body.contains("sha256:"));
+        assert!(!put_body.contains("reader-test-key"));
+        assert!(!put_body.contains("plain_key"));
+
+        let get = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config")
+                    .header(header::AUTHORIZATION, "Bearer admin-test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        let get_body = response_text(get).await;
+        assert!(get_body.contains("\"name\":\"reader\""));
+        assert!(!get_body.contains("reader-test-key"));
+        assert!(!get_body.contains("plain_key"));
+    }
+
+    #[tokio::test]
+    async fn s3_list_is_default_denied_before_backend_access() {
+        let app = build_app(test_state(), 1024 * 1024);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/quark?list-type=2&delimiter=/")
+                    .header(header::ACCEPT, "application/xml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            response_text(response)
+                .await
+                .contains("<Code>AccessDenied</Code>")
+        );
+    }
+
+    #[tokio::test]
+    async fn help_endpoint_is_ai_friendly_json() {
+        let app = build_app(test_state(), 1024 * 1024);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/help")
+                    .header(header::HOST, "127.0.0.1:9000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("\"service\":\"quark-s3-demo\""));
+        assert!(body.contains("GET /api/config"));
+        assert!(body.contains("GET /{bucket}?list-type=2"));
     }
 }

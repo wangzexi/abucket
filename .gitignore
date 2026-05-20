@@ -1,3 +1,4 @@
 /target
 quark.env
 *.env
+.DS_Store

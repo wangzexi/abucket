@@ -28,6 +28,10 @@ GET    /{bucket}/{key}
 HEAD   /{bucket}/{key}
 PUT    /{bucket}/{key}
 DELETE /{bucket}/{key}
+POST   /{bucket}/{key}?uploads
+PUT    /{bucket}/{key}?partNumber=<n>&uploadId=<id>
+POST   /{bucket}/{key}?uploadId=<id>
+DELETE /{bucket}/{key}?uploadId=<id>
 ```
 
 Config routes:
@@ -449,16 +453,12 @@ The effective config returned by `GET /api/config` can look like:
         "name": "admin",
         "key_hash": "sha256:...",
         "key_hint": "adm_...abcd",
-        "actions": ["*"],
-        "prefixes": ["*"],
         "enabled": true
       },
       {
         "name": "reader",
         "key_hash": "sha256:...",
         "key_hint": "rdr_...wxyz",
-        "actions": ["ListBucket", "HeadObject", "GetObject"],
-        "prefixes": ["public/*", "share/*"],
         "enabled": true
       }
     ],
@@ -484,6 +484,8 @@ The effective config returned by `GET /api/config` can look like:
 
 Keys should not be stored in plaintext. Store hashes and hints. If the service later generates a key, show the plaintext key only once.
 
+For manual config updates, `PUT /api/config` can accept a temporary `plain_key` field on a key. The service hashes it, stores only `key_hash` and `key_hint`, and never returns `plain_key`.
+
 ## Policy Model
 
 Each request resolves to a principal:
@@ -499,6 +501,8 @@ Actions:
 - `GetObject`
 - `PutObject`
 - `DeleteObject`
+
+`PutObject` also covers S3 multipart upload initiation, part upload, complete, and abort for the first version.
 
 Policy check:
 

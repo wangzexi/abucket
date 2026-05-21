@@ -11,12 +11,22 @@ use crate::chrono_millis;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ServiceConfig {
+    #[serde(default)]
+    pub(crate) s3: S3Config,
     #[serde(default = "default_mounts")]
     pub(crate) mounts: Vec<MountConfig>,
     #[serde(default)]
     pub(crate) auth: AuthConfig,
     #[serde(default)]
     pub(crate) cache: CacheConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct S3Config {
+    #[serde(default = "default_bucket")]
+    pub(crate) bucket: String,
+    #[serde(default = "default_max_upload_bytes")]
+    pub(crate) max_upload_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,9 +80,19 @@ pub(crate) struct CacheConfig {
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
+            s3: S3Config::default(),
             mounts: default_mounts(),
             auth: AuthConfig::default(),
             cache: CacheConfig::default(),
+        }
+    }
+}
+
+impl Default for S3Config {
+    fn default() -> Self {
+        Self {
+            bucket: default_bucket(),
+            max_upload_bytes: default_max_upload_bytes(),
         }
     }
 }
@@ -113,16 +133,24 @@ fn default_cache_max_bytes() -> u64 {
     50 * 1024 * 1024 * 1024
 }
 
+fn default_max_upload_bytes() -> usize {
+    128 * 1024 * 1024
+}
+
+fn default_bucket() -> String {
+    "quark".to_string()
+}
+
 pub(crate) fn config_db_path() -> Result<PathBuf> {
-    if let Ok(path) = env::var("QUARK_S3_DB") {
+    if let Ok(path) = env::var("ATREE_DB") {
         return Ok(PathBuf::from(path));
     }
-    let home = env::var("HOME").context("HOME is required when QUARK_S3_DB is not set")?;
+    let home = env::var("HOME").context("HOME is required when ATREE_DB is not set")?;
     Ok(PathBuf::from(home)
         .join(".local")
         .join("share")
-        .join("quark-s3-demo")
-        .join("quark-s3-demo.sqlite"))
+        .join("atree")
+        .join("atree.sqlite"))
 }
 
 pub(crate) fn load_or_init_config(db_path: &PathBuf) -> Result<ServiceConfig> {
@@ -185,8 +213,11 @@ pub(crate) fn commented_yaml(config: &ServiceConfig) -> Result<String> {
     Ok(format!("{}{}", CONFIG_YAML_COMMENTS, yaml))
 }
 
-const CONFIG_YAML_COMMENTS: &str = r#"# quark-s3-demo config
+const CONFIG_YAML_COMMENTS: &str = r#"# atree config
 # This YAML is meant for humans and AI agents. Comments are ignored on PUT.
+#
+# s3.bucket: path-style S3 bucket name used by clients. Default: quark.
+# s3.max_upload_bytes: max request body size for PUT/multipart parts. Changes need restart.
 #
 # mounts: ordered mount table. Later mounts have higher priority.
 # mounts[].mount_path: service path, must start with /. Example: /public
@@ -197,6 +228,8 @@ const CONFIG_YAML_COMMENTS: &str = r#"# quark-s3-demo config
 #   http_proxy: upstream http(s) URL prefix or file URL.
 # mounts[].enabled: false disables the mount without deleting it.
 # mounts[].options:
+#   quark_cookie.cookie: Quark web cookie for this mount.
+#   quark_cookie.root_fid: optional Quark root fid for this mount. Default: 0.
 #   http_proxy.proxy: optional outbound proxy URL, such as http://127.0.0.1:1080.
 #   use {} or null when unused.
 #
@@ -215,6 +248,10 @@ const CONFIG_YAML_COMMENTS: &str = r#"# quark-s3-demo config
 "#;
 
 pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
+    validate_bucket(&config.s3.bucket)?;
+    if config.s3.max_upload_bytes == 0 {
+        bail!("s3.max_upload_bytes must be greater than 0");
+    }
     if config.mounts.is_empty() {
         bail!("config.mounts must contain at least one mount");
     }
@@ -229,13 +266,33 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
             bail!("unsupported mount type '{}'", mount.mount_type);
         }
         match mount.mount_type.as_str() {
+            "quark_cookie" => {
+                validate_abs_path(&mount.root_path, "root_path")?;
+                if let Some(cookie) = mount.options.get("cookie") {
+                    let Some(cookie) = cookie.as_str() else {
+                        bail!("options.cookie must be a string");
+                    };
+                    if cookie.trim().is_empty() {
+                        bail!("options.cookie cannot be empty for quark_cookie mounts");
+                    }
+                }
+                if let Some(root_fid) = mount.options.get("root_fid") {
+                    let Some(root_fid) = root_fid.as_str() else {
+                        bail!("options.root_fid must be a string");
+                    };
+                    if root_fid.trim().is_empty() {
+                        bail!("options.root_fid cannot be empty");
+                    }
+                }
+            }
             "http_proxy" => {
                 validate_http_url(&mount.root_path, "root_path")?;
                 if let Some(proxy) = mount.options.get("proxy").and_then(|value| value.as_str()) {
                     validate_http_url(proxy, "options.proxy")?;
                 }
             }
-            _ => validate_abs_path(&mount.root_path, "root_path")?,
+            "system_config" => validate_abs_path(&mount.root_path, "root_path")?,
+            _ => unreachable!(),
         }
         if mount.enabled && mount.mount_type == "system_config" {
             has_system_config = true;
@@ -288,6 +345,16 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                 bail!("resource '{}' must start with / or be *", resource);
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_bucket(bucket: &str) -> Result<()> {
+    if bucket.trim().is_empty() {
+        bail!("s3.bucket cannot be empty");
+    }
+    if bucket.contains('/') {
+        bail!("s3.bucket cannot contain /");
     }
     Ok(())
 }

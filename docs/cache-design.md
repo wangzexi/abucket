@@ -1,6 +1,6 @@
 # Cache Design Notes
 
-This document records the current design decision for turning `quark-s3-demo` into a local fast cache in front of Quark Drive.
+This document records the design direction for adding a local fast cache in front of Quark Drive for `atree`.
 
 ## Goal
 
@@ -8,7 +8,9 @@ Expose Quark Drive through a local S3-ish service, while making frequently acces
 
 The important simplifying assumption is:
 
-> Quark Drive data managed by this service is only modified through this demo.
+> Quark Drive data managed by this service is only modified through this service.
+
+The current implementation already stores runtime config in SQLite and uses a tmp-backed `multipart/` directory for S3 multipart upload assembly. The read-through/write-through object cache described below is not implemented yet.
 
 Because of that, the local metadata database can be treated as a trusted index for objects this service has seen or written.
 
@@ -157,8 +159,8 @@ Use content-addressed or key-derived local paths.
 Recommended layout:
 
 ```text
-~/.local/share/quark-s3-demo/
-  quark-s3-demo.sqlite
+~/.local/share/atree/
+  atree.sqlite
   cache/
     objects/
       ab/
@@ -170,7 +172,15 @@ Recommended layout:
 
 Cache eviction should delete only local files and update SQLite to `remote_only`. It must never delete Quark objects.
 
-## First Implementation Steps
+## Implementation Status
+
+Completed:
+
+- SQLite-backed runtime config.
+- tmp-backed local directory for multipart upload parts.
+- S3 multipart upload compatibility by assembling local parts before uploading one final object to Quark.
+
+Planned cache work:
 
 1. Add SQLite metadata using `rusqlite`.
 2. Add local cache directories and temp-file helpers.

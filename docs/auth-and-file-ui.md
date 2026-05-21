@@ -1,6 +1,6 @@
 # Auth And File UI Design
 
-This document records the simplified auth, config, and file UI model for `quark-s3-demo`.
+This document records the simplified auth, config, and file UI model for `atree`.
 
 ## Core Idea
 
@@ -413,7 +413,7 @@ Reasons:
 
 - OpenList's JSON fields use names like `mount_path`, `root_path`, and `access_token`.
 - Rust `serde` can handle this cleanly with `rename_all = "snake_case"`.
-- Environment variables naturally use upper snake case, such as `QUARK_S3_SUPER_ADMIN_KEY`.
+- Environment variables naturally use upper snake case, such as `ATREE_SUPER_ADMIN_KEY`.
 - Frontend code can still use camelCase internally, but API/config boundaries should stay snake_case.
 
 ## Config Storage
@@ -441,37 +441,46 @@ Docs:
 
 Even if SQLite stores the normalized runtime state internally, `GET /api/config.yaml` should expose the user-facing config as readable YAML with comments.
 
-## Super Admin
+## Super Admin And Config Access
 
-Only a super-admin key can read or write config.
+The config file uses the same policy model as other mounted files:
+
+- `GET /api/config.yaml` requires `GetObject` on `/api/config.yaml`.
+- `PUT /api/config.yaml` requires `PutObject` on `/api/config.yaml`.
+- The environment super-admin key bypasses policy checks and is meant for bootstrap and recovery.
+
+This means config can be delegated to a normal configured key by adding explicit rules. The default generated config has no keys or rules, so the super-admin key is the only practical way to read or write config at first startup.
 
 The super-admin key is a bootstrap secret loaded from environment:
 
 ```text
-QUARK_S3_SUPER_ADMIN_KEY
+ATREE_SUPER_ADMIN_KEY
 ```
 
-Every config request must include:
+Bootstrap config requests can include:
 
 ```http
 Authorization: Bearer <super-admin-key>
 ```
 
-The super-admin key should not be stored in the normal config.
+The super-admin key should not be stored in the normal config or browser `localStorage`.
 
 ## Example Config
 
 The effective config returned by `GET /api/config.yaml` can look like:
 
 ```yaml
+s3:
+  bucket: quark
+  max_upload_bytes: 134217728
 mounts:
   - mount_path: /
     type: quark_cookie
     root_path: /
     enabled: true
     options:
-      order_by: none
-      order_direction: asc
+      cookie: "<quark cookie>"
+      root_fid: "0"
   - mount_path: /api/config.yaml
     type: system_config
     root_path: /
@@ -517,7 +526,7 @@ Each request resolves to a principal:
 
 - `anonymous`: no key
 - `key:<name>`: matched configured key
-- `super-admin`: bootstrap admin key, only for config routes unless explicitly allowed elsewhere
+- `super-admin`: bootstrap/recovery admin key that bypasses policy checks
 
 Actions:
 
@@ -564,7 +573,7 @@ Suggested response content:
 
 ```json
 {
-  "service": "quark-s3-demo",
+  "service": "atree",
   "auth": {
     "user_header": "Authorization: Bearer <key>",
     "admin_header": "Authorization: Bearer <super-admin-key>"
@@ -615,7 +624,7 @@ Differences here:
 - server is Rust, not Koa/tRPC
 - files come through mounts, initially backed by Quark
 - S3 routes are also browser routes
-- listing and file reads can use local SQLite/cache when available
+- listing and file reads can use local SQLite/cache after the cache layer is implemented
 
 ## Security Notes
 
@@ -649,15 +658,16 @@ else:
 
 ## Suggested First Version
 
-1. Add config model in SQLite.
-2. Add `QUARK_S3_SUPER_ADMIN_KEY`.
-3. Add `GET /api/config.yaml`, `PUT /api/config.yaml`, and `GET /api/help`.
-4. Add policy checks to existing S3 routes.
-5. Add browser detection for directory paths and return an HTML shell.
-6. Add directory index file lookup for browser directory requests.
-7. Build the homepage/file browser shell using the same S3 paths.
-8. Add a top-right copy button for `curl <origin>/api/help`.
-9. Store the browser access key in `localStorage`.
+Completed in the current implementation:
+
+- Config model stored in SQLite.
+- `ATREE_SUPER_ADMIN_KEY` bootstrap/recovery access.
+- `GET /api/config.yaml`, `PUT /api/config.yaml`, and `GET /api/help`.
+- Default-deny policy checks on S3/object routes.
+- Browser detection for directory paths and an HTML file browser shell.
+- Directory index file lookup for browser directory requests.
+- A top-right copy button for `curl <origin>/api/help`.
+- Browser access key storage in `localStorage`.
 
 Later:
 

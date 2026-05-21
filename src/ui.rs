@@ -39,7 +39,7 @@ pub(crate) fn file_browser_html(bucket: &str, virtual_path: &str) -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>quark-s3-demo</title>
+  <title>atree</title>
   <style>
     :root {{ color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
     body {{ margin: 0; background: Canvas; color: CanvasText; }}
@@ -63,7 +63,7 @@ pub(crate) fn file_browser_html(bucket: &str, virtual_path: &str) -> String {
 </head>
 <body>
   <header>
-    <strong>quark-s3-demo</strong>
+    <strong>atree</strong>
     <button id="copyHelp" type="button">复制 API help curl</button>
   </header>
   <main>
@@ -85,7 +85,7 @@ pub(crate) fn file_browser_html(bucket: &str, virtual_path: &str) -> String {
   <script>
     const BUCKET = {bucket_json};
     const INITIAL_PATH = {path_json};
-    const keyName = 'quark_s3_demo_key';
+    const keyName = 'atree_key';
     const keyInput = document.getElementById('keyInput');
     const authState = document.getElementById('authState');
     const message = document.getElementById('message');

@@ -46,8 +46,6 @@ const DEFAULT_CONFIG_PATH: &str = "/api/config.yaml";
 
 #[derive(Clone)]
 struct AppState {
-    quark: QuarkClient,
-    bucket: String,
     config: Arc<RwLock<ServiceConfig>>,
     db_path: PathBuf,
     super_admin_key: Option<String>,
@@ -56,9 +54,16 @@ struct AppState {
 
 #[derive(Debug, Clone)]
 enum ResolvedMount {
-    Quark { remote_key: String },
+    Quark {
+        remote_key: String,
+        cookie: String,
+        root_fid: String,
+    },
     SystemConfig,
-    HttpProxy { url: String, proxy: Option<String> },
+    HttpProxy {
+        url: String,
+        proxy: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -591,31 +596,20 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let cookie = env::var("QUARK_COOKIE").context("QUARK_COOKIE is required")?;
-    let root_fid = env::var("QUARK_ROOT_FID").unwrap_or_else(|_| "0".into());
-    let bucket = env::var("S3_BUCKET").unwrap_or_else(|_| "quark".into());
     let db_path = config_db_path()?;
-    let multipart_dir = db_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("multipart");
+    let multipart_dir = multipart_dir_path();
     std::fs::create_dir_all(&multipart_dir)?;
     let config = load_or_init_config(&db_path)?;
-    let super_admin_key = env::var("QUARK_S3_SUPER_ADMIN_KEY").ok();
+    let super_admin_key = env::var("ATREE_SUPER_ADMIN_KEY").ok();
     if super_admin_key.is_none() {
-        warn!("QUARK_S3_SUPER_ADMIN_KEY is not set; /api/config.yaml will be unavailable");
+        warn!("ATREE_SUPER_ADMIN_KEY is not set; /api/config.yaml will be unavailable");
     }
-    let max_upload_bytes = env::var("MAX_UPLOAD_BYTES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(128 * 1024 * 1024);
+    let max_upload_bytes = config.s3.max_upload_bytes;
     let bind: SocketAddr = env::var("BIND")
         .unwrap_or_else(|_| "127.0.0.1:9000".into())
         .parse()?;
 
     let state = AppState {
-        quark: QuarkClient::new(cookie, root_fid)?,
-        bucket,
         config: Arc::new(RwLock::new(config)),
         db_path,
         super_admin_key,
@@ -623,9 +617,26 @@ async fn main() -> Result<()> {
     };
     let app = build_app(state, max_upload_bytes);
     let listener = TcpListener::bind(bind).await?;
-    info!("serving quark-s3-demo at http://{bind}");
+    info!("serving atree at http://{bind}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn multipart_dir_path() -> PathBuf {
+    env::var("ATREE_MULTIPART_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| env::temp_dir().join("atree").join("multipart"))
+}
+
+async fn state_bucket(state: &AppState) -> String {
+    state.config.read().await.s3.bucket.clone()
+}
+
+fn quark_client(cookie: String, root_fid: String) -> Result<QuarkClient> {
+    if cookie.trim().is_empty() {
+        bail!("quark_cookie mount needs options.cookie in config.yaml");
+    }
+    QuarkClient::new(cookie, root_fid)
 }
 
 fn build_app(state: AppState, max_upload_bytes: usize) -> Router {
@@ -644,8 +655,9 @@ async fn root_handler(
     method: Method,
     headers: HeaderMap,
 ) -> Response {
+    let bucket = state_bucket(&state).await;
     if method == Method::GET && wants_html(&headers) {
-        return html_response(StatusCode::OK, file_browser_html(&state.bucket, "/"));
+        return html_response(StatusCode::OK, file_browser_html(&bucket, "/"));
     }
     if method != Method::GET {
         return s3_error(
@@ -659,7 +671,7 @@ async fn root_handler(
 <ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Buckets><Bucket><Name>{}</Name></Bucket></Buckets>
 </ListAllMyBucketsResult>"#,
-        xml_escape(&state.bucket)
+        xml_escape(&bucket)
     );
     xml_response(StatusCode::OK, xml)
 }
@@ -674,7 +686,8 @@ async fn config_handler(
     match method {
         Method::GET => {
             if !is_authorized(state, headers, "GetObject", virtual_path).await {
-                return access_denied(headers, &state.bucket);
+                let bucket = state_bucket(state).await;
+                return access_denied(headers, &bucket);
             }
             let config = state.config.read().await.clone();
             match commented_yaml(&config) {
@@ -684,7 +697,8 @@ async fn config_handler(
         }
         Method::PUT => {
             if !is_authorized(state, headers, "PutObject", virtual_path).await {
-                return access_denied(headers, &state.bucket);
+                let bucket = state_bucket(state).await;
+                return access_denied(headers, &bucket);
             }
             let config: ServiceConfig = match parse_config_yaml(&body) {
                 Ok(config) => config,
@@ -711,13 +725,14 @@ async fn config_handler(
 }
 
 async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let bucket = state_bucket(&state).await;
     let origin = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(|host| format!("http://{host}"))
         .unwrap_or_else(|| "http://127.0.0.1:9000".to_string());
     Json(json!({
-        "service": "quark-s3-demo",
+        "service": "atree",
         "auth": {
             "user_header": "Authorization: Bearer <key>",
             "admin_header": "Authorization: Bearer <super-admin-key>"
@@ -728,7 +743,7 @@ async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Resp
             "note": "Config is a YAML document exposed as a system file. GET requires GetObject on /api/config.yaml; PUT requires PutObject on /api/config.yaml. The bootstrap super-admin key is still allowed for first setup. PUT rejects invalid config and keeps the old one."
         },
         "s3": {
-            "bucket": state.bucket,
+            "bucket": bucket,
             "list": "GET /{bucket}?list-type=2&delimiter=/&prefix=<path>",
             "get": "GET /{bucket}/{key}",
             "head": "HEAD /{bucket}/{key}",
@@ -742,11 +757,11 @@ async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Resp
         "examples": {
             "get_config": format!("curl -H 'Authorization: Bearer <super-admin-key>' '{origin}{DEFAULT_CONFIG_PATH}'"),
             "put_config": format!("curl -X PUT -H 'Authorization: Bearer <super-admin-key>' --data @config.yaml '{origin}{DEFAULT_CONFIG_PATH}'"),
-            "list": format!("curl -H 'Authorization: Bearer <key>' '{origin}/{}?list-type=2&delimiter=/&prefix=public/'", state.bucket),
-            "upload": format!("curl -X PUT -H 'Authorization: Bearer <key>' -H 'Content-Type: text/plain' --data-binary @./example.txt '{origin}/{}/public/example.txt'", state.bucket),
-            "upload_with_curl_T": format!("curl -H 'Authorization: Bearer <key>' -T ./example.txt '{origin}/{}/public/example.txt'", state.bucket),
-            "read": format!("curl -H 'Authorization: Bearer <key>' '{origin}/{}/public/example.txt'", state.bucket),
-            "delete": format!("curl -X DELETE -H 'Authorization: Bearer <key>' '{origin}/{}/public/example.txt'", state.bucket)
+            "list": format!("curl -H 'Authorization: Bearer <key>' '{origin}/{bucket}?list-type=2&delimiter=/&prefix=public/'"),
+            "upload": format!("curl -X PUT -H 'Authorization: Bearer <key>' -H 'Content-Type: text/plain' --data-binary @./example.txt '{origin}/{bucket}/public/example.txt'"),
+            "upload_with_curl_T": format!("curl -H 'Authorization: Bearer <key>' -T ./example.txt '{origin}/{bucket}/public/example.txt'"),
+            "read": format!("curl -H 'Authorization: Bearer <key>' '{origin}/{bucket}/public/example.txt'"),
+            "delete": format!("curl -X DELETE -H 'Authorization: Bearer <key>' '{origin}/{bucket}/public/example.txt'")
         }
     }))
     .into_response()
@@ -759,10 +774,11 @@ async fn bucket_handler(
     method: Method,
     headers: HeaderMap,
 ) -> Response {
-    if bucket != state.bucket {
+    let current_bucket = state_bucket(&state).await;
+    if bucket != current_bucket {
         let virtual_path = format!("/{}", percent_decode_path(&bucket).trim_matches('/'));
         let config = state.config.read().await;
-        let mount = resolve_mount(&config, &virtual_path);
+        let mount = resolve_explicit_mount(&config, &virtual_path);
         drop(config);
         match mount {
             Some(ResolvedMount::SystemConfig) => {
@@ -775,7 +791,7 @@ async fn bucket_handler(
                     _ => "Unknown",
                 };
                 if !is_authorized(&state, &headers, action, &virtual_path).await {
-                    return access_denied(&headers, &state.bucket);
+                    return access_denied(&headers, &current_bucket);
                 }
                 return proxy_object(method, &headers, url, proxy).await;
             }
@@ -816,7 +832,8 @@ async fn object_handler(
     body: Bytes,
 ) -> Response {
     let key = percent_decode_path(&key);
-    let is_bucket_path = bucket == state.bucket;
+    let current_bucket = state_bucket(&state).await;
+    let is_bucket_path = bucket == current_bucket;
     let virtual_path = if is_bucket_path {
         format!("/{}", key.trim_start_matches('/'))
     } else {
@@ -830,7 +847,7 @@ async fn object_handler(
     if key.trim_matches('/').is_empty() {
         if !is_bucket_path {
             let config = state.config.read().await;
-            let mount = resolve_mount(&config, &virtual_path);
+            let mount = resolve_explicit_mount(&config, &virtual_path);
             drop(config);
             if matches!(mount, Some(ResolvedMount::SystemConfig)) {
                 return config_handler(&state, method, &headers, body, &virtual_path).await;
@@ -870,10 +887,14 @@ async fn object_handler(
         _ => "Unknown",
     };
     if !is_authorized(&state, &headers, action, &virtual_path).await {
-        return access_denied(&headers, &state.bucket);
+        return access_denied(&headers, &current_bucket);
     }
     let config = state.config.read().await;
-    let mount = match resolve_mount(&config, &virtual_path) {
+    let mount = match if is_bucket_path {
+        resolve_mount(&config, &virtual_path)
+    } else {
+        resolve_explicit_mount(&config, &virtual_path)
+    } {
         Some(mount) => mount,
         None if is_bucket_path => {
             return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "mount not found");
@@ -881,8 +902,20 @@ async fn object_handler(
         None => return s3_error(StatusCode::NOT_FOUND, "NoSuchBucket", "bucket not found"),
     };
     drop(config);
-    let remote_key = match mount {
-        ResolvedMount::Quark { remote_key } => remote_key,
+    let (remote_key, quark) = match mount {
+        ResolvedMount::Quark {
+            remote_key,
+            cookie,
+            root_fid,
+        } => {
+            let quark = match quark_client(cookie, root_fid) {
+                Ok(quark) => quark,
+                Err(err) => {
+                    return s3_error(StatusCode::BAD_REQUEST, "InvalidConfig", &err.to_string());
+                }
+            };
+            (remote_key, quark)
+        }
         ResolvedMount::SystemConfig => {
             return config_handler(&state, method, &headers, body, &virtual_path).await;
         }
@@ -898,14 +931,14 @@ async fn object_handler(
         return upload_multipart_part(&state, &params, body).await;
     }
     if method == Method::POST && params.contains_key("uploadId") {
-        return complete_multipart_upload(&state, &key, &remote_key, &params).await;
+        return complete_multipart_upload(&state, &quark, &key, &remote_key, &params).await;
     }
     if method == Method::DELETE && params.contains_key("uploadId") {
         return abort_multipart_upload(&state, &params).await;
     }
     let result = match method {
-        Method::GET => get_object(&state, &remote_key, &headers).await,
-        Method::HEAD => head_object(&state, &remote_key).await,
+        Method::GET => get_object(&quark, &remote_key, &headers).await,
+        Method::HEAD => head_object(&quark, &remote_key).await,
         Method::PUT => {
             let body = match decode_request_body(&headers, body) {
                 Ok(body) => body,
@@ -922,13 +955,12 @@ async fn object_handler(
                         .essence_str()
                         .to_string()
                 });
-            state
-                .quark
+            quark
                 .put_object(&remote_key, &content_type, body)
                 .await
                 .map(|_| (StatusCode::OK, [(header::ETAG, etag)]).into_response())
         }
-        Method::DELETE => delete_object(&state, &remote_key).await,
+        Method::DELETE => delete_object(&quark, &remote_key).await,
         _ => Ok(s3_error(
             StatusCode::METHOD_NOT_ALLOWED,
             "MethodNotAllowed",
@@ -950,6 +982,7 @@ async fn list_objects(
     base_virtual_path: &str,
     headers: &HeaderMap,
 ) -> Response {
+    let bucket = state_bucket(&state).await;
     let params = parse_query(&raw_query);
     let requested_prefix = params.get("prefix").cloned().unwrap_or_default();
     let base_prefix = base_virtual_path.trim_matches('/');
@@ -977,15 +1010,38 @@ async fn list_objects(
     };
 
     if !is_authorized(&state, headers, "ListBucket", &virtual_prefix).await {
-        return access_denied(headers, &state.bucket);
+        return access_denied(headers, &bucket);
     }
 
     let config = state.config.read().await;
-    let remote_dir = match resolve_remote_key(&config, &virtual_prefix) {
-        Some(key) => key,
+    let (remote_dir, quark) = match resolve_mount(&config, &virtual_prefix) {
+        Some(ResolvedMount::Quark {
+            remote_key,
+            cookie,
+            root_fid,
+        }) => {
+            let quark = match quark_client(cookie, root_fid) {
+                Ok(quark) => quark,
+                Err(err) => {
+                    return s3_error(StatusCode::BAD_REQUEST, "InvalidConfig", &err.to_string());
+                }
+            };
+            (remote_key, quark)
+        }
         None => {
             return list_xml(
-                &state.bucket,
+                &bucket,
+                &prefix,
+                delimiter.as_deref(),
+                max_keys,
+                None,
+                Vec::new(),
+                Vec::new(),
+            );
+        }
+        _ => {
+            return list_xml(
+                &bucket,
                 &prefix,
                 delimiter.as_deref(),
                 max_keys,
@@ -996,11 +1052,11 @@ async fn list_objects(
         }
     };
     drop(config);
-    let parent = match state.quark.resolve_dir(&remote_dir, false).await {
+    let parent = match quark.resolve_dir(&remote_dir, false).await {
         Ok(fid) => fid,
         Err(_) => {
             return list_xml(
-                &state.bucket,
+                &bucket,
                 &prefix,
                 delimiter.as_deref(),
                 max_keys,
@@ -1011,7 +1067,7 @@ async fn list_objects(
         }
     };
     let recursive = delimiter.as_deref() != Some("/");
-    let files = match list_files_for_s3(&state.quark, &parent, &dir_path, recursive).await {
+    let files = match list_files_for_s3(&quark, &parent, &dir_path, recursive).await {
         Ok(files) => files,
         Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "QuarkError", &err.to_string()),
     };
@@ -1044,7 +1100,7 @@ async fn list_objects(
         .take(remaining)
         .collect::<Vec<_>>();
     list_xml(
-        &state.bucket,
+        &bucket,
         &prefix,
         delimiter.as_deref(),
         max_keys,
@@ -1081,19 +1137,17 @@ async fn list_files_for_s3(
     Ok(out)
 }
 
-async fn get_object(state: &AppState, key: &str, headers: &HeaderMap) -> Result<Response> {
+async fn get_object(quark: &QuarkClient, key: &str, headers: &HeaderMap) -> Result<Response> {
     let total_start = SystemTime::now();
-    let file = state
-        .quark
+    let file = quark
         .find_object(key)
         .await?
         .filter(|f| f.file)
         .ok_or_else(|| anyhow!("object not found"))?;
-    let url = state.quark.download_url(&file.fid).await?;
-    let cookie = state.quark.cookie.lock().await.clone();
+    let url = quark.download_url(&file.fid).await?;
+    let cookie = quark.cookie.lock().await.clone();
     let range = parse_range_header(headers, file.size)?;
-    let mut req = state
-        .quark
+    let mut req = quark
         .http
         .get(url)
         .header(header::COOKIE, cookie)
@@ -1137,9 +1191,8 @@ async fn get_object(state: &AppState, key: &str, headers: &HeaderMap) -> Result<
     Ok(resp)
 }
 
-async fn head_object(state: &AppState, key: &str) -> Result<Response> {
-    let file = state
-        .quark
+async fn head_object(quark: &QuarkClient, key: &str) -> Result<Response> {
+    let file = quark
         .find_object(key)
         .await?
         .filter(|f| f.file)
@@ -1195,7 +1248,7 @@ async fn proxy_object(
         Method::HEAD => client.head(&url),
         _ => unreachable!(),
     }
-    .header(header::USER_AGENT, "quark-s3-demo/http-proxy");
+    .header(header::USER_AGENT, "atree/http-proxy");
     if let Some(range) = headers.get(header::RANGE) {
         req = req.header(header::RANGE, range);
     }
@@ -1229,14 +1282,15 @@ async fn proxy_object(
     resp
 }
 
-async fn delete_object(state: &AppState, key: &str) -> Result<Response> {
-    if let Some(file) = state.quark.find_object(key).await? {
-        state.quark.delete_fid(&file.fid).await?;
+async fn delete_object(quark: &QuarkClient, key: &str) -> Result<Response> {
+    if let Some(file) = quark.find_object(key).await? {
+        quark.delete_fid(&file.fid).await?;
     }
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn initiate_multipart_upload(state: &AppState, key: &str, remote_key: &str) -> Response {
+    let bucket = state_bucket(state).await;
     let upload_id = new_upload_id(remote_key);
     let dir = state.multipart_dir.join(&upload_id);
     if let Err(err) = std::fs::create_dir_all(&dir)
@@ -1257,7 +1311,7 @@ async fn initiate_multipart_upload(state: &AppState, key: &str, remote_key: &str
   <Key>{}</Key>
   <UploadId>{}</UploadId>
 </InitiateMultipartUploadResult>"#,
-            xml_escape(&state.bucket),
+            xml_escape(&bucket),
             xml_escape(key),
             xml_escape(&upload_id)
         ),
@@ -1308,6 +1362,7 @@ async fn upload_multipart_part(
 
 async fn complete_multipart_upload(
     state: &AppState,
+    quark: &QuarkClient,
     key: &str,
     remote_key: &str,
     params: &HashMap<String, String>,
@@ -1365,12 +1420,12 @@ async fn complete_multipart_upload(
         .first_or_octet_stream()
         .essence_str()
         .to_string();
-    match state
-        .quark
+    match quark
         .put_object(remote_key, &content_type, Bytes::from(full))
         .await
     {
         Ok(()) => {
+            let bucket = state_bucket(state).await;
             let _ = std::fs::remove_dir_all(&dir);
             xml_response(
                 StatusCode::OK,
@@ -1382,9 +1437,9 @@ async fn complete_multipart_upload(
   <Key>{}</Key>
   <ETag>{}</ETag>
 </CompleteMultipartUploadResult>"#,
-                    xml_escape(&state.bucket),
+                    xml_escape(&bucket),
                     xml_escape(key),
-                    xml_escape(&state.bucket),
+                    xml_escape(&bucket),
                     xml_escape(key),
                     xml_escape(&etag)
                 ),
@@ -1419,12 +1474,8 @@ fn safe_upload_id(upload_id: &str) -> String {
 }
 
 async fn browser_directory(state: &AppState, virtual_path: &str, headers: &HeaderMap) -> Response {
-    let html = || {
-        html_response(
-            StatusCode::OK,
-            file_browser_html(&state.bucket, virtual_path),
-        )
-    };
+    let bucket = state_bucket(state).await;
+    let html = || html_response(StatusCode::OK, file_browser_html(&bucket, virtual_path));
     if !is_authorized(state, headers, "ListBucket", virtual_path).await {
         return html();
     }
@@ -1436,10 +1487,18 @@ async fn browser_directory(state: &AppState, virtual_path: &str, headers: &Heade
         return html();
     }
     let config = state.config.read().await;
-    let Some(remote_key) = resolve_remote_key(&config, &index_path) else {
+    let Some(ResolvedMount::Quark {
+        remote_key,
+        cookie,
+        root_fid,
+    }) = resolve_mount(&config, &index_path)
+    else {
         return html();
     };
-    match get_object(state, &remote_key, headers).await {
+    let Ok(quark) = quark_client(cookie, root_fid) else {
+        return html();
+    };
+    match get_object(&quark, &remote_key, headers).await {
         Ok(resp) => resp,
         Err(_) => html(),
     }
@@ -1448,11 +1507,18 @@ async fn browser_directory(state: &AppState, virtual_path: &str, headers: &Heade
 async fn find_directory_index(state: &AppState, virtual_path: &str) -> Option<String> {
     let prefix = virtual_path.trim_matches('/');
     let config = state.config.read().await;
-    let remote_dir = resolve_remote_key(&config, &format!("/{prefix}"))?;
+    let ResolvedMount::Quark {
+        remote_key,
+        cookie,
+        root_fid,
+    } = resolve_mount(&config, &format!("/{prefix}"))?
+    else {
+        return None;
+    };
     drop(config);
-    let fid = state.quark.resolve_dir(&remote_dir, false).await.ok()?;
-    let mut candidates = state
-        .quark
+    let quark = quark_client(cookie, root_fid).ok()?;
+    let fid = quark.resolve_dir(&remote_key, false).await.ok()?;
+    let mut candidates = quark
         .list_files(&fid)
         .await
         .ok()?
@@ -1533,25 +1599,41 @@ fn resource_matches(pattern: &str, resource: &str) -> bool {
     pattern.trim_end_matches('/') == resource.trim_end_matches('/')
 }
 
+#[cfg(test)]
 fn resolve_remote_key(config: &ServiceConfig, virtual_path: &str) -> Option<String> {
     match resolve_mount(config, virtual_path)? {
-        ResolvedMount::Quark { remote_key } => Some(remote_key),
+        ResolvedMount::Quark { remote_key, .. } => Some(remote_key),
         _ => None,
     }
 }
 
 fn resolve_mount(config: &ServiceConfig, virtual_path: &str) -> Option<ResolvedMount> {
+    resolve_mount_inner(config, virtual_path, true)
+}
+
+fn resolve_explicit_mount(config: &ServiceConfig, virtual_path: &str) -> Option<ResolvedMount> {
+    resolve_mount_inner(config, virtual_path, false)
+}
+
+fn resolve_mount_inner(
+    config: &ServiceConfig,
+    virtual_path: &str,
+    include_root_mount: bool,
+) -> Option<ResolvedMount> {
     let path = normalize_virtual_path(virtual_path);
-    let mount = config
-        .mounts
-        .iter()
-        .rev()
-        .find(|mount| mount.enabled && mount_matches_for_type(mount, &path))?;
+    let mount = config.mounts.iter().rev().find(|mount| {
+        mount.enabled
+            && (include_root_mount || normalize_virtual_path(&mount.mount_path) != "/")
+            && mount_matches_for_type(mount, &path)
+    })?;
     match mount.mount_type.as_str() {
         "quark_cookie" => {
             let rest = strip_mount_path(&mount.mount_path, &path);
             Some(ResolvedMount::Quark {
                 remote_key: join_remote_path(&mount.root_path, rest),
+                cookie: mount_option_string(&mount.options, "cookie").unwrap_or_default(),
+                root_fid: mount_option_string(&mount.options, "root_fid")
+                    .unwrap_or_else(|| "0".to_string()),
             })
         }
         "system_config" => Some(ResolvedMount::SystemConfig),
@@ -1569,6 +1651,14 @@ fn resolve_mount(config: &ServiceConfig, virtual_path: &str) -> Option<ResolvedM
         }
         _ => None,
     }
+}
+
+fn mount_option_string(options: &Value, key: &str) -> Option<String> {
+    options
+        .get(key)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
 }
 
 fn mount_matches_for_type(mount: &config::MountConfig, path: &str) -> bool {
@@ -1987,10 +2077,14 @@ mod tests {
     };
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tower::ServiceExt;
+
+    static TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     fn config_with_mounts(mounts: Vec<MountConfig>) -> ServiceConfig {
         ServiceConfig {
+            s3: Default::default(),
             mounts,
             auth: AuthConfig::default(),
             cache: CacheConfig::default(),
@@ -2008,17 +2102,22 @@ mod tests {
     }
 
     fn test_state() -> AppState {
+        let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
         let db_path = std::env::temp_dir().join(format!(
-            "quark-s3-demo-test-{}-{}.sqlite",
+            "atree-test-{}-{}-{}.sqlite",
             std::process::id(),
-            chrono_millis()
+            chrono_millis(),
+            id
         ));
         let config = load_or_init_config(&db_path).unwrap();
-        let multipart_dir = db_path.with_extension("multipart");
+        let multipart_dir = std::env::temp_dir().join(format!(
+            "atree-test-multipart-{}-{}-{}",
+            std::process::id(),
+            chrono_millis(),
+            id
+        ));
         std::fs::create_dir_all(&multipart_dir).unwrap();
         AppState {
-            quark: QuarkClient::new("dummy=1".to_string(), "0".to_string()).unwrap(),
-            bucket: "quark".to_string(),
             config: Arc::new(RwLock::new(config)),
             multipart_dir,
             db_path,
@@ -2083,7 +2182,7 @@ mod tests {
         ));
         assert!(matches!(
             resolve_mount(&config, "/api/config.yaml/extra"),
-            Some(ResolvedMount::Quark { remote_key }) if remote_key == "root/api/config.yaml/extra"
+            Some(ResolvedMount::Quark { remote_key, .. }) if remote_key == "root/api/config.yaml/extra"
         ));
         assert!(matches!(
             resolve_mount(&config, "/github/client.tar.gz"),
@@ -2131,6 +2230,7 @@ mod tests {
     #[test]
     fn plain_key_is_hashed_and_not_serialized() {
         let config = ServiceConfig {
+            s3: Default::default(),
             mounts: default_mounts(),
             auth: AuthConfig {
                 keys: vec![KeyConfig {
@@ -2202,8 +2302,8 @@ mod tests {
             .unwrap();
         assert_eq!(html_resp.status(), StatusCode::OK);
         let html = response_text(html_resp).await;
-        assert!(html.contains("quark-s3-demo"));
-        assert!(html.contains("quark_s3_demo_key"));
+        assert!(html.contains("atree"));
+        assert!(html.contains("atree_key"));
 
         let xml_resp = app
             .oneshot(
@@ -2430,7 +2530,11 @@ cache:
             )
             .await
             .unwrap();
-        assert_eq!(bootstrap.status(), StatusCode::OK);
+        if bootstrap.status() != StatusCode::OK {
+            let status = bootstrap.status();
+            let body = response_text(bootstrap).await;
+            panic!("bootstrap status {status}: {body}");
+        }
 
         let delegated_get = app
             .clone()
@@ -2551,6 +2655,7 @@ cache:
 
         let state = test_state();
         *state.config.write().await = ServiceConfig {
+            s3: Default::default(),
             mounts: vec![
                 MountConfig {
                     mount_path: "/".to_string(),
@@ -2651,7 +2756,7 @@ cache:
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
-        assert!(body.contains("\"service\":\"quark-s3-demo\""));
+        assert!(body.contains("\"service\":\"atree\""));
         assert!(body.contains("GET /api/config.yaml"));
         assert!(body.contains("GET /{bucket}?list-type=2"));
         assert!(body.contains("--data-binary @./example.txt"));

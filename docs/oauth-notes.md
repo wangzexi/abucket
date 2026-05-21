@@ -1,11 +1,11 @@
 # Quark OAuth Migration Notes
 
-This demo currently uses the Quark web-cookie flow, following OpenList's `quark_uc` driver.
+The current service uses the Quark web-cookie flow, following OpenList's `quark_uc` driver.
 
 ## Current Mode
 
-- `QUARK_COOKIE` is captured from a logged-in `https://pan.quark.cn` browser session.
-- The demo calls Quark web APIs such as:
+- `quark_cookie` mount `options.cookie` is captured from a logged-in `https://pan.quark.cn` browser session.
+- The service calls Quark web APIs such as:
   - `https://drive.quark.cn/1/clouddrive/file/sort`
   - `https://drive.quark.cn/1/clouddrive/file/download`
   - `https://drive.quark.cn/1/clouddrive/file/upload/pre`
@@ -14,7 +14,7 @@ This demo currently uses the Quark web-cookie flow, following OpenList's `quark_
 
 ## Limitation
 
-Cookies expire. The demo updates `__puus` / `__pus` in memory when Quark returns new `Set-Cookie` headers, but it does not persist refreshed cookies back to disk yet.
+Cookies expire. The service updates `__puus` / `__pus` in memory when Quark returns new `Set-Cookie` headers, but it does not persist refreshed cookies back to disk yet.
 
 For unattended long-running use, web cookies are weaker than OAuth-style credentials.
 
@@ -66,7 +66,7 @@ OpenList's `quark_open` local refresh-token flow is not implemented. Its default
 https://api.oplist.org/quarkyun/renewapi
 ```
 
-That means the refresh token is sent to a third-party service unless a local refresh implementation is added. Do not enable that by default in this demo.
+That means the refresh token is sent to a third-party service unless a local refresh implementation is added. Do not enable that by default in this service.
 
 ## Migration Plan
 
@@ -87,7 +87,6 @@ That means the refresh token is sent to a third-party service unless a local ref
 
 ## Near-Term Improvements For Cookie Mode
 
-- Persist refreshed `__puus` / `__pus` back to `~/.config/quark-s3-demo/quark.env`.
-- Return real S3 `404 NoSuchKey` for missing objects instead of wrapping it as `502`.
-- Fix prefix listing so the current directory is not echoed as its own child.
+- Persist refreshed `__puus` / `__pus` back to the relevant `quark_cookie` mount config, or to another private state file if we decide not to expose refreshed cookies in config output.
 - Move large uploads away from whole-object-in-memory buffering.
+- Add a local `quark_open` refresh implementation before enabling OAuth-style credentials by default.

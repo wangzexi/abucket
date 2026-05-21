@@ -221,16 +221,23 @@ const CONFIG_YAML_COMMENTS: &str = r#"# atree config
 #
 # mounts: ordered mount table. Later mounts have higher priority.
 # mounts[].mount_path: service path, must start with /. Example: /public
-# mounts[].type: quark_cookie, system_config, or http_proxy.
+# mounts[].type: quark_cookie, quark_open, system_config, url_tree, or github_releases.
 # mounts[].root_path:
 #   quark_cookie: human-readable Quark path to expose at mount_path.
+#   quark_open: human-readable Quark path to expose at mount_path.
 #   system_config: ignored; keep it as /.
-#   http_proxy: upstream http(s) URL prefix or file URL.
+#   url_tree: upstream http(s) URL prefix or file URL.
+#   github_releases: GitHub repo in owner/repo form.
 # mounts[].enabled: false disables the mount without deleting it.
 # mounts[].options:
 #   quark_cookie.cookie: Quark web cookie for this mount.
 #   quark_cookie.root_fid: optional Quark root fid for this mount. Default: 0.
-#   http_proxy.proxy: optional outbound proxy URL, such as http://127.0.0.1:1080.
+#   quark_open.oauth_file: path to private OAuth YAML, such as quark-open-oauth.yaml.
+#   quark_open.access_token/refresh_token/app_id/sign_key/refresh_url can also be set directly.
+#   url_tree.proxy: optional outbound proxy URL, such as http://127.0.0.1:1080.
+#   github_releases.repo: owner/repo. If omitted, root_path can be owner/repo.
+#   github_releases.proxy: optional outbound proxy URL for API and downloads.
+#   github_releases.asset_allow: optional list of asset names or * globs.
 #   use {} or null when unused.
 #
 # auth.keys: named service keys. Do not store plaintext keys here.
@@ -261,14 +268,16 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
         validate_abs_path(&mount.mount_path, "mount_path")?;
         if !matches!(
             mount.mount_type.as_str(),
-            "quark_cookie" | "system_config" | "http_proxy"
+            "quark_cookie" | "quark_open" | "system_config" | "url_tree" | "github_releases"
         ) {
             bail!("unsupported mount type '{}'", mount.mount_type);
         }
         match mount.mount_type.as_str() {
-            "quark_cookie" => {
+            "quark_cookie" | "quark_open" => {
                 validate_abs_path(&mount.root_path, "root_path")?;
-                if let Some(cookie) = mount.options.get("cookie") {
+                if mount.mount_type == "quark_cookie"
+                    && let Some(cookie) = mount.options.get("cookie")
+                {
                     let Some(cookie) = cookie.as_str() else {
                         bail!("options.cookie must be a string");
                     };
@@ -284,11 +293,65 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                         bail!("options.root_fid cannot be empty");
                     }
                 }
+                if mount.mount_type == "quark_open" {
+                    for key in [
+                        "oauth_file",
+                        "access_token",
+                        "refresh_token",
+                        "app_id",
+                        "sign_key",
+                        "refresh_url",
+                    ] {
+                        if let Some(value) = mount.options.get(key)
+                            && !value.is_string()
+                        {
+                            bail!("options.{key} must be a string");
+                        }
+                    }
+                }
             }
-            "http_proxy" => {
+            "url_tree" => {
                 validate_http_url(&mount.root_path, "root_path")?;
                 if let Some(proxy) = mount.options.get("proxy").and_then(|value| value.as_str()) {
                     validate_http_url(proxy, "options.proxy")?;
+                }
+            }
+            "github_releases" => {
+                if mount.root_path.trim().is_empty()
+                    && mount
+                        .options
+                        .get("repo")
+                        .and_then(|value| value.as_str())
+                        .is_none()
+                {
+                    bail!("github_releases needs root_path or options.repo in owner/repo form");
+                }
+                for key in ["repo", "token", "proxy"] {
+                    if let Some(value) = mount.options.get(key)
+                        && !value.is_string()
+                    {
+                        bail!("options.{key} must be a string");
+                    }
+                }
+                if let Some(proxy) = mount.options.get("proxy").and_then(|value| value.as_str()) {
+                    validate_http_url(proxy, "options.proxy")?;
+                }
+                if let Some(value) = mount.options.get("show_source_code")
+                    && !value.is_boolean()
+                    && !value.is_string()
+                {
+                    bail!("options.show_source_code must be a boolean");
+                }
+                if let Some(value) = mount.options.get("asset_allow") {
+                    match value {
+                        Value::Array(values) => {
+                            if !values.iter().all(Value::is_string) {
+                                bail!("options.asset_allow entries must be strings");
+                            }
+                        }
+                        Value::String(_) => {}
+                        _ => bail!("options.asset_allow must be a list of strings"),
+                    }
                 }
             }
             "system_config" => validate_abs_path(&mount.root_path, "root_path")?,

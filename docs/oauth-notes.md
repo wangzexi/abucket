@@ -58,7 +58,7 @@ Upload also requires proof fields:
 
 OpenList computes proof ranges from MD5-derived offsets and base64-encodes the selected bytes.
 
-## Important Risk
+## Refresh Path
 
 OpenList's `quark_open` local refresh-token flow is not implemented. Its default token refresh path calls:
 
@@ -66,27 +66,29 @@ OpenList's `quark_open` local refresh-token flow is not implemented. Its default
 https://api.oplist.org/quarkyun/renewapi
 ```
 
-That means the refresh token is sent to a third-party service unless a local refresh implementation is added. Do not enable that by default in this service.
+That means the refresh token is sent to a third-party service unless a local refresh implementation is added.
+
+For the self-hosted APIPages flow used by `oauth.example.com`, `/quarkyun/renewapi` returns only `access_token` and `refresh_token`. The underlying FnOS Quark OAuth refresh endpoint returns the app signing fields under `data.tokenInfo.appId` and `data.tokenInfo.signKey`, so atree uses that endpoint directly when the private OAuth YAML sets:
+
+```yaml
+source:
+  refresh_url: https://oauth.fnnas.com/api/v1/oauth/refreshToken
+```
+
+The token page does not print `sign_key` because OpenList APIPages normally treats application keys as server-side credentials.
+
+This has been tested with real Quark OAuth credentials: atree can list the root directory and complete a small-object PUT, GET, byte-for-byte readback, and DELETE loop through the `quark_open` mount.
 
 ## Migration Plan
 
-1. Keep the current cookie backend as `quark_uc`.
-2. Add a backend enum/config, for example:
-   - `QUARK_BACKEND=cookie`
-   - `QUARK_BACKEND=open`
-3. Add `quark_open` config:
-   - `QUARK_ACCESS_TOKEN`
-   - `QUARK_REFRESH_TOKEN`
-   - `QUARK_APP_ID`
-   - `QUARK_SIGN_KEY`
-   - optional `QUARK_OPEN_REFRESH_URL`
-4. Implement `quark_open` list/download first.
-5. Implement upload after list/download works, including proof generation.
-6. Keep third-party refresh disabled unless explicitly configured.
-7. If local refresh protocol is discovered, implement local refresh and persist rotated tokens to a private config file.
+1. Keep the current cookie backend as `quark_cookie`.
+2. Use `type: quark_open` for OAuth-backed mounts.
+3. Store OAuth secrets in a private ignored YAML, then reference it from mount `options.oauth_file`.
+4. Refresh rotated access/refresh tokens back into the private OAuth YAML.
+5. Keep `source.refresh_url` pointed at `https://oauth.fnnas.com/api/v1/oauth/refreshToken` for FnOS-backed Quark OAuth tokens; the OpenList APIPages renew endpoint is not enough for atree because it omits `sign_key`.
 
 ## Near-Term Improvements For Cookie Mode
 
 - Persist refreshed `__puus` / `__pus` back to the relevant `quark_cookie` mount config, or to another private state file if we decide not to expose refreshed cookies in config output.
 - Move large uploads away from whole-object-in-memory buffering.
-- Add a local `quark_open` refresh implementation before enabling OAuth-style credentials by default.
+- Add a fully local `quark_open` refresh implementation if Quark/FnOS publishes a stable documented protocol.

@@ -291,10 +291,10 @@ A mount maps a path in this service to a path in some remote system.
 Fields:
 
 - `mount_path`: where the mount appears in this service
-- `type`: how to access the remote system, such as `quark_cookie`, `system_config`, `http_proxy`, future `quark_open`, or future `s3`
+- `type`: how to access the remote system, such as `quark_cookie`, `quark_open`, `system_config`, `url_tree`, `github_releases`, or future `s3`
 - `root_path`: where this mount starts in the remote system
 - `enabled`: whether the mount is active
-- `options`: driver-specific settings, such as an outbound proxy for `http_proxy`
+- `options`: mount-specific settings, such as an outbound proxy for `url_tree` or `github_releases`
 
 `mount_path` is the mount's unique identifier. A separate `name` field is not needed in the first version.
 
@@ -314,15 +314,17 @@ Example:
 Current mount types:
 
 - `quark_cookie`: read/write Quark Drive through the captured web cookie.
+- `quark_open`: read/write Quark Drive through QuarkOpen OAuth credentials.
 - `system_config`: exposes the live YAML config as one file. It must match the exact mount path, not children under it.
-- `http_proxy`: read-only `GET`/`HEAD` proxy from a URL prefix. This is useful for GitHub release/raw files that need a server-side proxy in mainland China.
+- `url_tree`: read-only `GET`/`HEAD` access to URL-backed files. This is useful for raw URLs or fixed download prefixes that need a server-side proxy in mainland China.
+- `github_releases`: read-only latest GitHub Release asset tree. This is better than `url_tree` for release assets because it supports listing the files through S3/ListBucket.
 
-Example HTTP proxy mount:
+Example URL tree mount:
 
 ```yaml
 mounts:
   - mount_path: /github/sing-box
-    type: http_proxy
+    type: url_tree
     root_path: https://github.com/SagerNet/sing-box/releases/download/v1.12.0
     enabled: true
     options:
@@ -332,6 +334,27 @@ auth:
     - principal: anonymous
       actions: [HeadObject, GetObject]
       resources: [/github/sing-box/*]
+```
+
+Example GitHub releases mount:
+
+```yaml
+mounts:
+  - mount_path: /hiddify
+    type: github_releases
+    root_path: hiddify/hiddify-app
+    enabled: true
+    options:
+      proxy: http://127.0.0.1:1080
+      asset_allow:
+        - Hiddify-Android-universal.apk
+        - Hiddify-MacOS.dmg
+        - Hiddify-Windows-Portable-x64.zip
+auth:
+  rules:
+    - principal: anonymous
+      actions: [ListBucket, HeadObject, GetObject]
+      resources: [/hiddify/*]
 ```
 
 `/github/sing-box/file.tar.gz` maps to `https://github.com/SagerNet/sing-box/releases/download/v1.12.0/file.tar.gz`. The proxy option belongs to this mount only; other mounts can stay direct.
@@ -486,7 +509,7 @@ mounts:
     root_path: /
     enabled: true
   - mount_path: /github/sing-box
-    type: http_proxy
+    type: url_tree
     root_path: https://github.com/SagerNet/sing-box/releases/download/v1.12.0
     enabled: true
     options:

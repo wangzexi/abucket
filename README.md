@@ -70,6 +70,36 @@ mounts:
       root_fid: '0'
 ```
 
+如果要避免 Cookie 失效，可以用 QuarkOpen OAuth token。`oauth_file` 是本机私密文件，里面保存 access token、refresh token、refresh URL、app id 和 sign key；access token 过期时，atree 会用 refresh token 刷新，并把新 token 写回这个 YAML：
+
+```yaml
+mounts:
+  - mount_path: /
+    type: quark_open
+    root_path: /
+    enabled: true
+    options:
+      oauth_file: quark-open-oauth.yaml
+      root_fid: '0'
+```
+
+当前 `oauth.example.com/quarkyun/renewapi` 是 OpenList APIPages 的裁剪接口，只返回 access/refresh token，不返回 Quark Open 请求签名所需的 `sign_key`。atree 的私密 OAuth YAML 应该把 `source.refresh_url` 设为飞牛原始刷新接口，这样能同时刷新 token 并保存 `app_id/sign_key`：
+
+```yaml
+kind: quark_open_oauth
+source:
+  token_page: https://oauth.example.com/
+  callback_url: https://oauth.example.com/quarkyun/callback
+  refresh_url: https://oauth.fnnas.com/api/v1/oauth/refreshToken
+  driver: quarkyun_fn
+application:
+  client_id: '<private app id>'
+  sign_key: '<private sign key>'
+tokens:
+  access_token: '<private>'
+  refresh_token: '<private>'
+```
+
 配置文件本身也是挂载树的一部分，所以你也可以把它移动到别的路径，只要保留至少一个启用的 `system_config` mount。例如：
 
 ```yaml
@@ -84,12 +114,12 @@ mounts:
     enabled: true
 ```
 
-外部只读文件可以用 `http_proxy` 挂载。`root_path` 是上游 URL 前缀，`options.proxy` 只影响这个挂载，适合把 GitHub 下载资源通过服务端和本机代理中转出来：
+外部只读文件可以用 `url_tree` 挂载。`root_path` 是上游 URL 前缀，`options.proxy` 只影响这个挂载，适合把 raw URL、固定版本下载地址等资源通过服务端和本机代理中转出来。这里的储存类型叫 `url_tree`，代理只是访问选项：
 
 ```yaml
 mounts:
   - mount_path: /github/sing-box
-    type: http_proxy
+    type: url_tree
     root_path: https://github.com/SagerNet/sing-box/releases/download/v1.12.0
     enabled: true
     options:
@@ -101,7 +131,28 @@ auth:
       resources: [/github/sing-box/*]
 ```
 
-访问 `/github/sing-box/sing-box-1.12.0-darwin-amd64.tar.gz` 时，服务会转发到对应 GitHub URL。当前 `http_proxy` 是只读的文件/前缀代理，不支持目录列举。
+访问 `/github/sing-box/sing-box-1.12.0-darwin-amd64.tar.gz` 时，服务会转发到对应 GitHub URL。当前 `url_tree` 是只读的文件/前缀代理，不支持目录列举。
+
+如果上游是 GitHub Release，优先用 `github_releases`。它会从 GitHub API 读取 latest release assets，并把 assets 暴露成可列举、可下载的文件；`options.proxy` 同样只是访问 GitHub API 和下载资源时的出站代理：
+
+```yaml
+mounts:
+  - mount_path: /hiddify
+    type: github_releases
+    root_path: hiddify/hiddify-app
+    enabled: true
+    options:
+      proxy: http://127.0.0.1:1080
+      asset_allow:
+        - Hiddify-Android-universal.apk
+        - Hiddify-MacOS.dmg
+        - Hiddify-Windows-Portable-x64.zip
+auth:
+  rules:
+    - principal: anonymous
+      actions: [ListBucket, HeadObject, GetObject]
+      resources: [/hiddify/*]
+```
 
 ## 简单测试
 
@@ -187,7 +238,8 @@ await client.fPutObject("quark", "examples/file.txt", "/tmp/file.txt");
 - S3 XML 返回只覆盖常见字段，兼容性主要面向 restic、MinIO JS SDK、`aws s3`/`curl` 的基础操作。
 - Multipart upload 会先把分片落到系统 tmp 里的 `atree/multipart/` 临时目录，Complete 时再合并上传到夸克。可以用 `ATREE_MULTIPART_DIR` 改位置。
 - 下载会代理夸克下载链接，而不是返回 302。
-- `http_proxy` mount 只支持 `GET` 和 `HEAD`，支持透传 `Range`，暂不做目录列表和本地缓存。
+- `url_tree` mount 只支持 `GET` 和 `HEAD`，支持透传 `Range`，暂不做目录列表和本地缓存。
+- `github_releases` mount 当前支持 latest release assets 的只读列表和下载，暂不支持 all versions、多仓库合并和 README/source code 的完整 OpenList 行为。
 - Cookie 自动刷新只保存在进程内，没有写回磁盘。
 - 浏览器 UI 是内嵌单 HTML，不需要前后端分离；私有文件的直接地址访问仍需要请求里携带 key。
 

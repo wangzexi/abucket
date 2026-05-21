@@ -1,4 +1,5 @@
 /target
 quark.env
+quark-open-oauth.yaml
 *.env
 .DS_Store

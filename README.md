@@ -14,6 +14,7 @@
 - S3 multipart upload 的最小流程：`POST ?uploads`、`PUT ?partNumber=&uploadId=`、`POST ?uploadId=`、`DELETE ?uploadId=`
 - `GET /api/help`：返回面向 curl/AI 的接口说明
 - `GET /api/config.yaml` / `PUT /api/config.yaml`：像修改一个系统文件一样管理 mount、key、权限和 cache
+- `GET` / `HEAD` 外部 HTTP 文件挂载：把 GitHub release/raw 等 URL 挂到服务文件树中，可按挂载单独配置代理
 
 这不是完整 S3 实现，暂时没有校验 AWS Signature。它优先覆盖 restic、curl、MinIO JS SDK 基础上传下载会用到的 S3 语义。
 
@@ -34,7 +35,7 @@ cargo run
 ~/.local/share/quark-s3-demo/quark-s3-demo.sqlite
 ```
 
-默认配置只有一个 `/` mount，指向夸克根目录，但没有匿名权限。配置就是 `/api/config.yaml` 这份系统文件：
+默认配置有两个 mount：`/` 指向夸克根目录，`/api/config.yaml` 是配置系统文件。默认没有匿名权限：
 
 ```bash
 curl -H 'Authorization: Bearer <super-admin-key>' \
@@ -53,6 +54,39 @@ curl -X PUT \
 `auth.keys[]` 可以临时传 `plain_key`，服务会保存为 `key_hash` 和 `key_hint`，之后 `GET /api/config.yaml` 不会返回明文 key。
 
 `/api/config.yaml` 也走同一套权限模型：读取需要 `GetObject`，修改需要 `PutObject`，资源路径就是 `/api/config.yaml`。`QUARK_S3_SUPER_ADMIN_KEY` 只是 bootstrap key，用来第一次写入配置或救援。
+
+配置文件本身也是挂载树的一部分，所以你也可以把它移动到别的路径，只要保留至少一个启用的 `system_config` mount。例如：
+
+```yaml
+mounts:
+  - mount_path: /
+    type: quark_cookie
+    root_path: /
+    enabled: true
+  - mount_path: /system/config.yaml
+    type: system_config
+    root_path: /
+    enabled: true
+```
+
+外部只读文件可以用 `http_proxy` 挂载。`root_path` 是上游 URL 前缀，`options.proxy` 只影响这个挂载，适合把 GitHub 下载资源通过服务端和本机代理中转出来：
+
+```yaml
+mounts:
+  - mount_path: /github/sing-box
+    type: http_proxy
+    root_path: https://github.com/SagerNet/sing-box/releases/download/v1.12.0
+    enabled: true
+    options:
+      proxy: http://127.0.0.1:1080
+auth:
+  rules:
+    - principal: anonymous
+      actions: [HeadObject, GetObject]
+      resources: [/github/sing-box/*]
+```
+
+访问 `/github/sing-box/sing-box-1.12.0-darwin-amd64.tar.gz` 时，服务会转发到对应 GitHub URL。当前 `http_proxy` 是只读的文件/前缀代理，不支持目录列举。
 
 ## 简单测试
 
@@ -143,6 +177,7 @@ await client.fPutObject("quark", "demo/file.txt", "/tmp/file.txt");
 - S3 XML 返回只覆盖常见字段，兼容性主要面向 restic、MinIO JS SDK、`aws s3`/`curl` 的基础操作。
 - Multipart upload 会先把分片落到本机 SQLite 旁边的 `multipart/` 临时目录，Complete 时再合并上传到夸克。
 - 下载会代理夸克下载链接，而不是返回 302。
+- `http_proxy` mount 只支持 `GET` 和 `HEAD`，支持透传 `Range`，暂不做目录列表和本地缓存。
 - Cookie 自动刷新只保存在进程内，没有写回磁盘。
 - 浏览器 UI 是内嵌单 HTML，不需要前后端分离；私有文件的直接地址访问仍需要请求里携带 key。
 

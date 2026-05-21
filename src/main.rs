@@ -25,7 +25,7 @@ use config::{
     parse_config_yaml, save_config_to_db,
 };
 use futures_util::TryStreamExt;
-use reqwest::Client;
+use reqwest::{Client, Proxy, Url};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
@@ -42,6 +42,7 @@ const QUARK_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
 const REFERER: &str = "https://pan.quark.cn";
 const API: &str = "https://drive.quark.cn/1/clouddrive";
 const PR: &str = "ucpro";
+const DEFAULT_CONFIG_PATH: &str = "/api/config.yaml";
 
 #[derive(Clone)]
 struct AppState {
@@ -51,6 +52,13 @@ struct AppState {
     db_path: PathBuf,
     super_admin_key: Option<String>,
     multipart_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+enum ResolvedMount {
+    Quark { remote_key: String },
+    SystemConfig,
+    HttpProxy { url: String, proxy: Option<String> },
 }
 
 #[derive(Clone)]
@@ -623,7 +631,6 @@ async fn main() -> Result<()> {
 fn build_app(state: AppState, max_upload_bytes: usize) -> Router {
     Router::new()
         .route("/", any(root_handler))
-        .route("/api/config.yaml", any(config_handler))
         .route("/api/help", any(help_handler))
         .route("/{bucket}", any(bucket_handler))
         .route("/{bucket}/", any(bucket_handler))
@@ -658,15 +665,16 @@ async fn root_handler(
 }
 
 async fn config_handler(
-    State(state): State<AppState>,
+    state: &AppState,
     method: Method,
-    headers: HeaderMap,
+    headers: &HeaderMap,
     body: Bytes,
+    virtual_path: &str,
 ) -> Response {
     match method {
         Method::GET => {
-            if !is_authorized(&state, &headers, "GetObject", "/api/config.yaml").await {
-                return access_denied(&headers, &state.bucket);
+            if !is_authorized(state, headers, "GetObject", virtual_path).await {
+                return access_denied(headers, &state.bucket);
             }
             let config = state.config.read().await.clone();
             match commented_yaml(&config) {
@@ -675,8 +683,8 @@ async fn config_handler(
             }
         }
         Method::PUT => {
-            if !is_authorized(&state, &headers, "PutObject", "/api/config.yaml").await {
-                return access_denied(&headers, &state.bucket);
+            if !is_authorized(state, headers, "PutObject", virtual_path).await {
+                return access_denied(headers, &state.bucket);
             }
             let config: ServiceConfig = match parse_config_yaml(&body) {
                 Ok(config) => config,
@@ -715,8 +723,8 @@ async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Resp
             "admin_header": "Authorization: Bearer <super-admin-key>"
         },
         "config": {
-            "get": "GET /api/config.yaml",
-            "put": "PUT /api/config.yaml",
+            "get": format!("GET {DEFAULT_CONFIG_PATH}"),
+            "put": format!("PUT {DEFAULT_CONFIG_PATH}"),
             "note": "Config is a YAML document exposed as a system file. GET requires GetObject on /api/config.yaml; PUT requires PutObject on /api/config.yaml. The bootstrap super-admin key is still allowed for first setup. PUT rejects invalid config and keeps the old one."
         },
         "s3": {
@@ -732,8 +740,8 @@ async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Resp
             "login": "The HTML UI stores the service access key in localStorage and sends it as Authorization: Bearer <key> for list/read requests."
         },
         "examples": {
-            "get_config": format!("curl -H 'Authorization: Bearer <super-admin-key>' '{origin}/api/config.yaml'"),
-            "put_config": format!("curl -X PUT -H 'Authorization: Bearer <super-admin-key>' --data @config.yaml '{origin}/api/config.yaml'"),
+            "get_config": format!("curl -H 'Authorization: Bearer <super-admin-key>' '{origin}{DEFAULT_CONFIG_PATH}'"),
+            "put_config": format!("curl -X PUT -H 'Authorization: Bearer <super-admin-key>' --data @config.yaml '{origin}{DEFAULT_CONFIG_PATH}'"),
             "list": format!("curl -H 'Authorization: Bearer <key>' '{origin}/{}?list-type=2&delimiter=/&prefix=public/'", state.bucket),
             "upload": format!("curl -X PUT -H 'Authorization: Bearer <key>' -H 'Content-Type: text/plain' --data-binary @./example.txt '{origin}/{}/public/example.txt'", state.bucket),
             "upload_with_curl_T": format!("curl -H 'Authorization: Bearer <key>' -T ./example.txt '{origin}/{}/public/example.txt'", state.bucket),
@@ -752,6 +760,27 @@ async fn bucket_handler(
     headers: HeaderMap,
 ) -> Response {
     if bucket != state.bucket {
+        let virtual_path = format!("/{}", percent_decode_path(&bucket).trim_matches('/'));
+        let config = state.config.read().await;
+        let mount = resolve_mount(&config, &virtual_path);
+        drop(config);
+        match mount {
+            Some(ResolvedMount::SystemConfig) => {
+                return config_handler(&state, method, &headers, Bytes::new(), &virtual_path).await;
+            }
+            Some(ResolvedMount::HttpProxy { url, proxy }) => {
+                let action = match method {
+                    Method::GET => "GetObject",
+                    Method::HEAD => "HeadObject",
+                    _ => "Unknown",
+                };
+                if !is_authorized(&state, &headers, action, &virtual_path).await {
+                    return access_denied(&headers, &state.bucket);
+                }
+                return proxy_object(method, &headers, url, proxy).await;
+            }
+            _ => {}
+        }
         return s3_error(StatusCode::NOT_FOUND, "NoSuchBucket", "bucket not found");
     }
     let raw_query = raw_query.unwrap_or_default();
@@ -786,12 +815,28 @@ async fn object_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if bucket != state.bucket {
-        return s3_error(StatusCode::NOT_FOUND, "NoSuchBucket", "bucket not found");
-    }
     let key = percent_decode_path(&key);
-    let virtual_path = format!("/{}", key.trim_start_matches('/'));
+    let is_bucket_path = bucket == state.bucket;
+    let virtual_path = if is_bucket_path {
+        format!("/{}", key.trim_start_matches('/'))
+    } else {
+        let bucket = percent_decode_path(&bucket);
+        format!(
+            "/{}/{}",
+            bucket.trim_matches('/'),
+            key.trim_start_matches('/')
+        )
+    };
     if key.trim_matches('/').is_empty() {
+        if !is_bucket_path {
+            let config = state.config.read().await;
+            let mount = resolve_mount(&config, &virtual_path);
+            drop(config);
+            if matches!(mount, Some(ResolvedMount::SystemConfig)) {
+                return config_handler(&state, method, &headers, body, &virtual_path).await;
+            }
+            return s3_error(StatusCode::NOT_FOUND, "NoSuchBucket", "bucket not found");
+        }
         return match method {
             Method::GET if wants_html(&headers) => browser_directory(&state, "/", &headers).await,
             Method::GET => list_objects(state, raw_query.unwrap_or_default(), "/", &headers).await,
@@ -828,11 +873,23 @@ async fn object_handler(
         return access_denied(&headers, &state.bucket);
     }
     let config = state.config.read().await;
-    let remote_key = match resolve_remote_key(&config, &virtual_path) {
-        Some(key) => key,
-        None => return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "mount not found"),
+    let mount = match resolve_mount(&config, &virtual_path) {
+        Some(mount) => mount,
+        None if is_bucket_path => {
+            return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "mount not found");
+        }
+        None => return s3_error(StatusCode::NOT_FOUND, "NoSuchBucket", "bucket not found"),
     };
     drop(config);
+    let remote_key = match mount {
+        ResolvedMount::Quark { remote_key } => remote_key,
+        ResolvedMount::SystemConfig => {
+            return config_handler(&state, method, &headers, body, &virtual_path).await;
+        }
+        ResolvedMount::HttpProxy { url, proxy } => {
+            return proxy_object(method, &headers, url, proxy).await;
+        }
+    };
     if method == Method::POST && params.contains_key("uploads") {
         return initiate_multipart_upload(&state, &key, &remote_key).await;
     }
@@ -1099,6 +1156,77 @@ async fn head_object(state: &AppState, key: &str) -> Result<Response> {
     resp.headers_mut()
         .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     Ok(resp)
+}
+
+async fn proxy_object(
+    method: Method,
+    headers: &HeaderMap,
+    url: String,
+    proxy: Option<String>,
+) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return s3_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "MethodNotAllowed",
+            "http_proxy mounts are read-only",
+        );
+    }
+    let mut builder = Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(120));
+    if let Some(proxy_url) = proxy {
+        match Proxy::all(&proxy_url) {
+            Ok(proxy) => builder = builder.proxy(proxy),
+            Err(err) => return s3_error(StatusCode::BAD_REQUEST, "InvalidProxy", &err.to_string()),
+        }
+    }
+    let client = match builder.build() {
+        Ok(client) => client,
+        Err(err) => {
+            return s3_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ProxyError",
+                &err.to_string(),
+            );
+        }
+    };
+    let mut req = match method {
+        Method::GET => client.get(&url),
+        Method::HEAD => client.head(&url),
+        _ => unreachable!(),
+    }
+    .header(header::USER_AGENT, "quark-s3-demo/http-proxy");
+    if let Some(range) = headers.get(header::RANGE) {
+        req = req.header(header::RANGE, range);
+    }
+    let upstream = match req.send().await {
+        Ok(resp) => resp,
+        Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "UpstreamError", &err.to_string()),
+    };
+    let status = upstream.status();
+    let upstream_headers = upstream.headers().clone();
+    let mut resp = if method == Method::HEAD {
+        status.into_response()
+    } else {
+        Response::new(Body::from_stream(
+            upstream.bytes_stream().map_err(std::io::Error::other),
+        ))
+    };
+    *resp.status_mut() = status;
+    for name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::CONTENT_RANGE,
+        header::LAST_MODIFIED,
+        header::ETAG,
+        header::CACHE_CONTROL,
+        header::ACCEPT_RANGES,
+    ] {
+        if let Some(value) = upstream_headers.get(&name) {
+            resp.headers_mut().insert(name, value.clone());
+        }
+    }
+    resp
 }
 
 async fn delete_object(state: &AppState, key: &str) -> Result<Response> {
@@ -1406,17 +1534,48 @@ fn resource_matches(pattern: &str, resource: &str) -> bool {
 }
 
 fn resolve_remote_key(config: &ServiceConfig, virtual_path: &str) -> Option<String> {
+    match resolve_mount(config, virtual_path)? {
+        ResolvedMount::Quark { remote_key } => Some(remote_key),
+        _ => None,
+    }
+}
+
+fn resolve_mount(config: &ServiceConfig, virtual_path: &str) -> Option<ResolvedMount> {
     let path = normalize_virtual_path(virtual_path);
     let mount = config
         .mounts
         .iter()
         .rev()
-        .find(|mount| mount.enabled && mount_matches(&mount.mount_path, &path))?;
-    if mount.mount_type != "quark_cookie" {
-        return None;
+        .find(|mount| mount.enabled && mount_matches_for_type(mount, &path))?;
+    match mount.mount_type.as_str() {
+        "quark_cookie" => {
+            let rest = strip_mount_path(&mount.mount_path, &path);
+            Some(ResolvedMount::Quark {
+                remote_key: join_remote_path(&mount.root_path, rest),
+            })
+        }
+        "system_config" => Some(ResolvedMount::SystemConfig),
+        "http_proxy" => {
+            let rest = strip_mount_path(&mount.mount_path, &path);
+            Some(ResolvedMount::HttpProxy {
+                url: join_url_path(&mount.root_path, rest)?,
+                proxy: mount
+                    .options
+                    .get("proxy")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToString::to_string),
+            })
+        }
+        _ => None,
     }
-    let rest = strip_mount_path(&mount.mount_path, &path);
-    Some(join_remote_path(&mount.root_path, rest))
+}
+
+fn mount_matches_for_type(mount: &config::MountConfig, path: &str) -> bool {
+    if mount.mount_type == "system_config" {
+        return normalize_virtual_path(&mount.mount_path) == path;
+    }
+    mount_matches(&mount.mount_path, path)
 }
 
 fn mount_matches(mount_path: &str, path: &str) -> bool {
@@ -1446,6 +1605,19 @@ fn join_remote_path(root_path: &str, rest: &str) -> String {
         (false, true) => root.to_string(),
         (false, false) => format!("{root}/{rest}"),
     }
+}
+
+fn join_url_path(root_url: &str, rest: &str) -> Option<String> {
+    let mut url = Url::parse(root_url).ok()?;
+    if !rest.trim_matches('/').is_empty() {
+        let mut path = url.path().trim_end_matches('/').to_string();
+        for segment in rest.trim_matches('/').split('/') {
+            path.push('/');
+            path.push_str(segment);
+        }
+        url.set_path(&path);
+    }
+    Some(url.to_string())
 }
 
 fn normalize_virtual_path(path: &str) -> String {
@@ -1886,6 +2058,42 @@ mod tests {
     }
 
     #[test]
+    fn system_config_and_http_proxy_mounts_resolve_in_service_tree() {
+        let config = config_with_mounts(vec![
+            mount("/", "/root"),
+            MountConfig {
+                mount_path: "/github".to_string(),
+                mount_type: "http_proxy".to_string(),
+                root_path: "https://github.com/example-org/releases".to_string(),
+                enabled: true,
+                options: json!({"proxy": "http://127.0.0.1:1080"}),
+            },
+            MountConfig {
+                mount_path: "/api/config.yaml".to_string(),
+                mount_type: "system_config".to_string(),
+                root_path: "/".to_string(),
+                enabled: true,
+                options: Value::Null,
+            },
+        ]);
+
+        assert!(matches!(
+            resolve_mount(&config, "/api/config.yaml"),
+            Some(ResolvedMount::SystemConfig)
+        ));
+        assert!(matches!(
+            resolve_mount(&config, "/api/config.yaml/extra"),
+            Some(ResolvedMount::Quark { remote_key }) if remote_key == "root/api/config.yaml/extra"
+        ));
+        assert!(matches!(
+            resolve_mount(&config, "/github/client.tar.gz"),
+            Some(ResolvedMount::HttpProxy { url, proxy })
+                if url == "https://github.com/example-org/releases/client.tar.gz"
+                    && proxy.as_deref() == Some("http://127.0.0.1:1080")
+        ));
+    }
+
+    #[test]
     fn auth_rules_default_deny_and_allow_anonymous_by_rule() {
         let mut config = ServiceConfig::default();
         assert!(!policy_allows(
@@ -2061,6 +2269,10 @@ mounts:
     type: quark_cookie
     root_path: /
     enabled: true
+  - mount_path: /api/config.yaml
+    type: system_config
+    root_path: /
+    enabled: true
 auth:
   keys:
     - name: reader
@@ -2118,6 +2330,10 @@ cache:
 mounts:
   - mount_path: /
     type: quark_cookie
+    root_path: /
+    enabled: true
+  - mount_path: /api/config.yaml
+    type: system_config
     root_path: /
     enabled: true
 auth:
@@ -2185,6 +2401,10 @@ mounts:
     type: quark_cookie
     root_path: /
     enabled: true
+  - mount_path: /api/config.yaml
+    type: system_config
+    root_path: /
+    enabled: true
 auth:
   keys:
     - name: config-editor
@@ -2238,6 +2458,145 @@ cache:
             .await
             .unwrap();
         assert_eq!(delegated_put.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn config_yaml_mount_path_can_move() {
+        let app = build_app(test_state(), 1024 * 1024);
+        let moved_config = r#"
+mounts:
+  - mount_path: /
+    type: quark_cookie
+    root_path: /
+    enabled: true
+  - mount_path: /system/config.yaml
+    type: system_config
+    root_path: /
+    enabled: true
+auth:
+  keys:
+    - name: config-reader
+      plain_key: config-reader-key
+      enabled: true
+  rules:
+    - principal: key:config-reader
+      actions: [GetObject]
+      resources: [/system/config.yaml]
+cache:
+  enabled: true
+  max_bytes: 1048576
+"#;
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/config.yaml")
+                    .header(header::AUTHORIZATION, "Bearer admin-test-key")
+                    .body(Body::from(moved_config))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+
+        let moved_get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/system/config.yaml")
+                    .header(header::AUTHORIZATION, "Bearer config-reader-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(moved_get.status(), StatusCode::OK);
+        assert!(
+            response_text(moved_get)
+                .await
+                .contains("/system/config.yaml")
+        );
+
+        let old_get = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config.yaml")
+                    .header(header::AUTHORIZATION, "Bearer admin-test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(old_get.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn http_proxy_mount_streams_external_file() {
+        async fn upstream() -> Response {
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/plain")],
+                "proxied payload",
+            )
+                .into_response()
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let app = Router::new().route("/files/client.txt", any(upstream));
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let state = test_state();
+        *state.config.write().await = ServiceConfig {
+            mounts: vec![
+                MountConfig {
+                    mount_path: "/".to_string(),
+                    mount_type: "quark_cookie".to_string(),
+                    root_path: "/".to_string(),
+                    enabled: true,
+                    options: Value::Null,
+                },
+                MountConfig {
+                    mount_path: "/api/config.yaml".to_string(),
+                    mount_type: "system_config".to_string(),
+                    root_path: "/".to_string(),
+                    enabled: true,
+                    options: Value::Null,
+                },
+                MountConfig {
+                    mount_path: "/github".to_string(),
+                    mount_type: "http_proxy".to_string(),
+                    root_path: format!("http://{addr}/files"),
+                    enabled: true,
+                    options: Value::Null,
+                },
+            ],
+            auth: AuthConfig {
+                keys: Vec::new(),
+                rules: vec![AuthRule {
+                    principal: "anonymous".to_string(),
+                    actions: vec!["GetObject".to_string(), "HeadObject".to_string()],
+                    resources: vec!["/github/*".to_string()],
+                }],
+            },
+            cache: CacheConfig::default(),
+        };
+        let app = build_app(state, 1024 * 1024);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/github/client.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_text(response).await, "proxied payload");
     }
 
     #[tokio::test]

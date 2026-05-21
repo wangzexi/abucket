@@ -272,6 +272,8 @@ PUT /api/config.yaml
 
 The config API is YAML-only at the HTTP boundary. `GET /api/config.yaml` returns explanatory comments for humans and AI agents, and `PUT /api/config.yaml` ignores those comments naturally. This path behaves like a special system file mount: reading it requires `GetObject` on `/api/config.yaml`, and updating it requires `PutObject` on `/api/config.yaml`. The environment super-admin key is only a bootstrap and recovery credential.
 
+The config endpoint is not special outside the mount model. It is a `system_config` mount. A user can move it by editing `mounts`, but validation must require at least one enabled `system_config` mount so the service cannot easily lose its editable config file.
+
 To add a key, remove a key, or change permissions:
 
 1. `GET /api/config.yaml`
@@ -289,9 +291,10 @@ A mount maps a path in this service to a path in some remote system.
 Fields:
 
 - `mount_path`: where the mount appears in this service
-- `type`: how to access the remote system, such as `quark_cookie`, `quark_open`, `s3`, or `local`
+- `type`: how to access the remote system, such as `quark_cookie`, `system_config`, `http_proxy`, future `quark_open`, or future `s3`
 - `root_path`: where this mount starts in the remote system
 - `enabled`: whether the mount is active
+- `options`: driver-specific settings, such as an outbound proxy for `http_proxy`
 
 `mount_path` is the mount's unique identifier. A separate `name` field is not needed in the first version.
 
@@ -307,6 +310,31 @@ Example:
   "enabled": true
 }
 ```
+
+Current mount types:
+
+- `quark_cookie`: read/write Quark Drive through the captured web cookie.
+- `system_config`: exposes the live YAML config as one file. It must match the exact mount path, not children under it.
+- `http_proxy`: read-only `GET`/`HEAD` proxy from a URL prefix. This is useful for GitHub release/raw files that need a server-side proxy in mainland China.
+
+Example HTTP proxy mount:
+
+```yaml
+mounts:
+  - mount_path: /github/sing-box
+    type: http_proxy
+    root_path: https://github.com/SagerNet/sing-box/releases/download/v1.12.0
+    enabled: true
+    options:
+      proxy: http://127.0.0.1:1080
+auth:
+  rules:
+    - principal: anonymous
+      actions: [HeadObject, GetObject]
+      resources: [/github/sing-box/*]
+```
+
+`/github/sing-box/file.tar.gz` maps to `https://github.com/SagerNet/sing-box/releases/download/v1.12.0/file.tar.gz`. The proxy option belongs to this mount only; other mounts can stay direct.
 
 The routing rule should be:
 
@@ -444,6 +472,16 @@ mounts:
     options:
       order_by: none
       order_direction: asc
+  - mount_path: /api/config.yaml
+    type: system_config
+    root_path: /
+    enabled: true
+  - mount_path: /github/sing-box
+    type: http_proxy
+    root_path: https://github.com/SagerNet/sing-box/releases/download/v1.12.0
+    enabled: true
+    options:
+      proxy: http://127.0.0.1:1080
 auth:
   keys:
     - name: admin
@@ -458,6 +496,9 @@ auth:
     - principal: anonymous
       actions: [HeadObject, GetObject]
       resources: [/public/*]
+    - principal: anonymous
+      actions: [HeadObject, GetObject]
+      resources: [/github/sing-box/*]
     - principal: key:reader
       actions: [ListBucket, HeadObject, GetObject]
       resources: [/public/*, /share/*]

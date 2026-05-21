@@ -1,6 +1,7 @@
 use std::{collections::HashSet, env, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
+use reqwest::Url;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -86,13 +87,22 @@ impl Default for CacheConfig {
 }
 
 pub(crate) fn default_mounts() -> Vec<MountConfig> {
-    vec![MountConfig {
-        mount_path: "/".to_string(),
-        mount_type: "quark_cookie".to_string(),
-        root_path: "/".to_string(),
-        enabled: true,
-        options: Value::Null,
-    }]
+    vec![
+        MountConfig {
+            mount_path: "/".to_string(),
+            mount_type: "quark_cookie".to_string(),
+            root_path: "/".to_string(),
+            enabled: true,
+            options: Value::Null,
+        },
+        MountConfig {
+            mount_path: "/api/config.yaml".to_string(),
+            mount_type: "system_config".to_string(),
+            root_path: "/".to_string(),
+            enabled: true,
+            options: Value::Null,
+        },
+    ]
 }
 
 fn default_true() -> bool {
@@ -180,10 +190,15 @@ const CONFIG_YAML_COMMENTS: &str = r#"# quark-s3-demo config
 #
 # mounts: ordered mount table. Later mounts have higher priority.
 # mounts[].mount_path: service path, must start with /. Example: /public
-# mounts[].type: currently only quark_cookie is supported.
-# mounts[].root_path: human-readable Quark path to expose at mount_path.
+# mounts[].type: quark_cookie, system_config, or http_proxy.
+# mounts[].root_path:
+#   quark_cookie: human-readable Quark path to expose at mount_path.
+#   system_config: ignored; keep it as /.
+#   http_proxy: upstream http(s) URL prefix or file URL.
 # mounts[].enabled: false disables the mount without deleting it.
-# mounts[].options: reserved driver-specific object; use {} or null when unused.
+# mounts[].options:
+#   http_proxy.proxy: optional outbound proxy URL, such as http://127.0.0.1:1080.
+#   use {} or null when unused.
 #
 # auth.keys: named service keys. Do not store plaintext keys here.
 # auth.keys[].plain_key: allowed only in PUT; the service stores key_hash/key_hint and never returns plain_key.
@@ -204,15 +219,33 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
         bail!("config.mounts must contain at least one mount");
     }
     let mut mount_paths = HashSet::new();
+    let mut has_system_config = false;
     for mount in &config.mounts {
         validate_abs_path(&mount.mount_path, "mount_path")?;
-        validate_abs_path(&mount.root_path, "root_path")?;
-        if mount.mount_type != "quark_cookie" {
+        if !matches!(
+            mount.mount_type.as_str(),
+            "quark_cookie" | "system_config" | "http_proxy"
+        ) {
             bail!("unsupported mount type '{}'", mount.mount_type);
+        }
+        match mount.mount_type.as_str() {
+            "http_proxy" => {
+                validate_http_url(&mount.root_path, "root_path")?;
+                if let Some(proxy) = mount.options.get("proxy").and_then(|value| value.as_str()) {
+                    validate_http_url(proxy, "options.proxy")?;
+                }
+            }
+            _ => validate_abs_path(&mount.root_path, "root_path")?,
+        }
+        if mount.enabled && mount.mount_type == "system_config" {
+            has_system_config = true;
         }
         if !mount_paths.insert(mount.mount_path.clone()) {
             bail!("duplicate mount_path '{}'", mount.mount_path);
         }
+    }
+    if !has_system_config {
+        bail!("config.mounts must contain at least one enabled system_config mount");
     }
 
     let mut names = HashSet::new();
@@ -265,6 +298,14 @@ fn validate_abs_path(path: &str, field: &str) -> Result<()> {
     }
     if path.split('/').any(|p| p == "..") {
         bail!("{field} cannot contain ..");
+    }
+    Ok(())
+}
+
+fn validate_http_url(url: &str, field: &str) -> Result<()> {
+    let parsed = Url::parse(url).with_context(|| format!("{field} must be a valid URL"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        bail!("{field} must use http or https");
     }
     Ok(())
 }

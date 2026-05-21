@@ -21,8 +21,8 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use config::{
-    ServiceConfig, config_db_path, hash_key, load_or_init_config, normalize_config,
-    save_config_to_db,
+    ServiceConfig, commented_yaml, config_db_path, hash_key, load_or_init_config, normalize_config,
+    parse_config_bytes, save_config_to_db,
 };
 use futures_util::TryStreamExt;
 use reqwest::Client;
@@ -659,6 +659,7 @@ async fn root_handler(
 
 async fn config_handler(
     State(state): State<AppState>,
+    RawQuery(raw_query): RawQuery,
     method: Method,
     headers: HeaderMap,
     body: Bytes,
@@ -669,10 +670,17 @@ async fn config_handler(
     match method {
         Method::GET => {
             let config = state.config.read().await.clone();
-            Json(config).into_response()
+            if wants_yaml_config(raw_query.as_deref().unwrap_or_default(), &headers) {
+                match commented_yaml(&config) {
+                    Ok(yaml) => yaml_response(StatusCode::OK, yaml),
+                    Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+                }
+            } else {
+                Json(config).into_response()
+            }
         }
         Method::PUT => {
-            let config: ServiceConfig = match serde_json::from_slice(&body) {
+            let config: ServiceConfig = match parse_config_bytes(&body, is_yaml_content(&headers)) {
                 Ok(config) => config,
                 Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
             };
@@ -707,8 +715,10 @@ async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Resp
         },
         "config": {
             "get": "GET /api/config",
+            "get_yaml": "GET /api/config?format=yaml or Accept: application/yaml",
             "put": "PUT /api/config",
-            "note": "Config is one JSON document. Edit mounts, auth.keys, auth.rules, and cache together. PUT rejects invalid config and keeps the old one."
+            "put_yaml": "PUT /api/config with Content-Type: application/yaml",
+            "note": "Config is one document. JSON remains supported; YAML GET includes comments for humans/AI and YAML PUT ignores comments. Edit mounts, auth.keys, auth.rules, and cache together. PUT rejects invalid config and keeps the old one."
         },
         "s3": {
             "bucket": state.bucket,
@@ -724,7 +734,9 @@ async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Resp
         },
         "examples": {
             "get_config": format!("curl -H 'Authorization: Bearer <super-admin-key>' '{origin}/api/config'"),
+            "get_config_yaml": format!("curl -H 'Authorization: Bearer <super-admin-key>' -H 'Accept: application/yaml' '{origin}/api/config'"),
             "put_config": format!("curl -X PUT -H 'Authorization: Bearer <super-admin-key>' -H 'Content-Type: application/json' --data @config.json '{origin}/api/config'"),
+            "put_config_yaml": format!("curl -X PUT -H 'Authorization: Bearer <super-admin-key>' -H 'Content-Type: application/yaml' --data @config.yaml '{origin}/api/config'"),
             "list": format!("curl -H 'Authorization: Bearer <key>' '{origin}/{}?list-type=2&delimiter=/&prefix=public/'", state.bucket),
             "upload": format!("curl -X PUT -H 'Authorization: Bearer <key>' -H 'Content-Type: text/plain' --data-binary @./example.txt '{origin}/{}/public/example.txt'", state.bucket),
             "upload_with_curl_T": format!("curl -H 'Authorization: Bearer <key>' -T ./example.txt '{origin}/{}/public/example.txt'", state.bucket),
@@ -1480,6 +1492,33 @@ fn is_super_admin(state: &AppState, headers: &HeaderMap) -> bool {
     bearer_token(headers).as_deref() == Some(expected)
 }
 
+fn wants_yaml_config(raw_query: &str, headers: &HeaderMap) -> bool {
+    let params = parse_query(raw_query);
+    params
+        .get("format")
+        .is_some_and(|format| format.eq_ignore_ascii_case("yaml"))
+        || headers
+            .get(header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(header_accepts_yaml)
+}
+
+fn is_yaml_content(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(header_accepts_yaml)
+}
+
+fn header_accepts_yaml(value: &str) -> bool {
+    value.split([';', ',']).map(str::trim).any(|part| {
+        matches!(
+            part,
+            "application/yaml" | "application/x-yaml" | "text/yaml" | "text/x-yaml"
+        )
+    })
+}
+
 fn list_xml(
     bucket: &str,
     prefix: &str,
@@ -1558,6 +1597,15 @@ fn html_response(status: StatusCode, html: String) -> Response {
 
 fn json_error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({"ok": false, "error": message}))).into_response()
+}
+
+fn yaml_response(status: StatusCode, yaml: String) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/yaml; charset=utf-8")],
+        yaml,
+    )
+        .into_response()
 }
 
 fn access_denied(headers: &HeaderMap, bucket: &str) -> Response {
@@ -2087,6 +2135,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn config_api_supports_commented_yaml_roundtrip() {
+        let app = build_app(test_state(), 1024 * 1024);
+        let yaml_config = r#"
+# This comment should be ignored on PUT.
+mounts:
+  - mount_path: /
+    type: quark_cookie
+    root_path: /
+    enabled: true
+auth:
+  keys:
+    # plain_key is accepted only on write and removed on read.
+    - name: yaml-reader
+      plain_key: yaml-reader-key
+      enabled: true
+  rules:
+    - principal: key:yaml-reader
+      actions: [ListBucket, GetObject]
+      resources: [/*]
+cache:
+  enabled: true
+  max_bytes: 2097152
+"#;
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/config")
+                    .header(header::AUTHORIZATION, "Bearer admin-test-key")
+                    .header(header::CONTENT_TYPE, "application/yaml")
+                    .body(Body::from(yaml_config))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+        let put_body = response_text(put).await;
+        assert!(put_body.contains("sha256:"));
+        assert!(!put_body.contains("yaml-reader-key"));
+
+        let get = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config?format=yaml")
+                    .header(header::AUTHORIZATION, "Bearer admin-test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        assert_eq!(
+            get.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/yaml; charset=utf-8")
+        );
+        let body = response_text(get).await;
+        assert!(body.contains("# mounts[].mount_path"));
+        assert!(body.contains("name: yaml-reader"));
+        assert!(body.contains("key_hash: sha256:"));
+        assert!(!body.contains("yaml-reader-key"));
+        assert!(!body.contains("\nplain_key:"));
+    }
+
+    #[tokio::test]
     async fn s3_list_is_default_denied_before_backend_access() {
         let app = build_app(test_state(), 1024 * 1024);
         let response = app
@@ -2124,6 +2239,7 @@ mod tests {
         let body = response_text(response).await;
         assert!(body.contains("\"service\":\"quark-s3-demo\""));
         assert!(body.contains("GET /api/config"));
+        assert!(body.contains("application/yaml"));
         assert!(body.contains("GET /{bucket}?list-type=2"));
         assert!(body.contains("--data-binary @./example.txt"));
         assert!(body.contains("-T ./example.txt"));

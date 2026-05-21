@@ -166,6 +166,44 @@ pub(crate) fn normalize_config(mut config: ServiceConfig) -> Result<ServiceConfi
     Ok(config)
 }
 
+pub(crate) fn parse_config_bytes(bytes: &[u8], is_yaml: bool) -> Result<ServiceConfig> {
+    if is_yaml {
+        Ok(serde_yaml::from_slice(bytes)?)
+    } else {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+}
+
+pub(crate) fn commented_yaml(config: &ServiceConfig) -> Result<String> {
+    let yaml = serde_yaml::to_string(config)?;
+    Ok(format!("{}{}", CONFIG_YAML_COMMENTS, yaml))
+}
+
+const CONFIG_YAML_COMMENTS: &str = r#"# quark-s3-demo config
+# This YAML is meant for humans and AI agents. Comments are ignored on PUT.
+# You can also use JSON: GET /api/config and PUT with Content-Type: application/json.
+#
+# mounts: ordered mount table. Later mounts have higher priority.
+# mounts[].mount_path: service path, must start with /. Example: /public
+# mounts[].type: currently only quark_cookie is supported.
+# mounts[].root_path: human-readable Quark path to expose at mount_path.
+# mounts[].enabled: false disables the mount without deleting it.
+# mounts[].options: reserved driver-specific object; use {} or null when unused.
+#
+# auth.keys: named service keys. Do not store plaintext keys here.
+# auth.keys[].plain_key: allowed only in PUT; the service stores key_hash/key_hint and never returns plain_key.
+# auth.keys[].key_hash: sha256:<hex> hash generated from plain_key.
+# auth.keys[].key_hint: short non-secret hint for humans.
+# auth.rules: default-deny allow-list.
+# auth.rules[].principal: anonymous or key:<name>.
+# auth.rules[].actions: ListBucket, HeadObject, GetObject, PutObject, DeleteObject, or *.
+# auth.rules[].resources: service paths such as /public/* or /*.
+#
+# cache.enabled: reserved for read-through cache work.
+# cache.max_bytes: max local cache size in bytes; it is not Quark capacity.
+
+"#;
+
 pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
     if config.mounts.is_empty() {
         bail!("config.mounts must contain at least one mount");

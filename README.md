@@ -13,7 +13,7 @@
 - `GET /quark/<key>` + `Range`：范围读取，供 restic 读取 pack 片段
 - S3 multipart upload 的最小流程：`POST ?uploads`、`PUT ?partNumber=&uploadId=`、`POST ?uploadId=`、`DELETE ?uploadId=`
 - `GET /api/help`：返回面向 curl/AI 的接口说明
-- `GET /api/config` / `PUT /api/config`：用一个 JSON 文档管理 mount、key、权限和 cache 配置
+- `GET /api/config` / `PUT /api/config`：用一个配置文档管理 mount、key、权限和 cache；支持 JSON，也支持带注释的 YAML
 
 这不是完整 S3 实现，暂时没有校验 AWS Signature。它优先覆盖 restic、curl、MinIO JS SDK 基础上传下载会用到的 S3 语义。
 
@@ -45,6 +45,24 @@ curl -X PUT \
 ```
 
 `auth.keys[]` 可以临时传 `plain_key`，服务会保存为 `key_hash` 和 `key_hint`，之后 `GET /api/config` 不会返回明文 key。
+
+如果想让 AI 更容易编辑字段，可以拉带注释的 YAML：
+
+```bash
+curl -H 'Authorization: Bearer <super-admin-key>' \
+  -H 'Accept: application/yaml' \
+  'http://127.0.0.1:9000/api/config' > config.yaml
+```
+
+编辑后直接 PUT 回去，YAML 注释会被忽略：
+
+```bash
+curl -X PUT \
+  -H 'Authorization: Bearer <super-admin-key>' \
+  -H 'Content-Type: application/yaml' \
+  --data @config.yaml \
+  'http://127.0.0.1:9000/api/config'
+```
 
 ## 简单测试
 

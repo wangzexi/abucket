@@ -270,6 +270,8 @@ GET /api/config
 PUT /api/config
 ```
 
+The config API supports both JSON and YAML. JSON remains the machine-stable default. YAML is useful for human and AI editing because `GET /api/config?format=yaml` or `Accept: application/yaml` can include explanatory comments, and `PUT` with `Content-Type: application/yaml` ignores those comments naturally.
+
 To add a key, remove a key, or change permissions:
 
 1. `GET /api/config`

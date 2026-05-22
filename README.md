@@ -12,8 +12,8 @@
 - `DELETE /quark/<key>`：删除对象
 - `GET /quark/<key>` + `Range`：范围读取，供 restic 读取 pack 片段
 - S3 multipart upload 的最小流程：`POST ?uploads`、`PUT ?partNumber=&uploadId=`、`POST ?uploadId=`、`DELETE ?uploadId=`
-- `GET /api/help`：返回面向 curl/AI 的接口说明
-- `GET /api/config.yaml` / `PUT /api/config.yaml`：像修改一个系统文件一样管理 mount、key、权限和 cache
+- `GET /api/help`（默认）：返回面向 curl/AI 的接口说明
+- `GET /api/config.yaml` / `PUT /api/config.yaml`：像修改一个系统文件一样管理 mount、key、权限和 cache，系统文件挂在 `/api` 目录下（还支持把它移动到其他系统路径）
 - `GET` / `HEAD` 外部 HTTP 文件挂载：把 GitHub release/raw 等 URL 挂到服务文件树中，可按挂载单独配置代理
 
 这不是完整 S3 实现，暂时没有校验 AWS Signature。服务自己的访问控制由 `Authorization: Bearer <key>`、或 AWS SigV4 `Credential` 里的 access key 映射到本地 key 后完成。
@@ -34,7 +34,7 @@ cargo run
 ~/.local/share/atree/atree.sqlite
 ```
 
-默认配置有三个 mount：`/` 指向夸克根目录，`/api/config.yaml` 是配置系统文件，`/api/help` 是内建的系统帮助文件。默认没有匿名权限：
+默认配置有两个 mount：`/` 指向夸克根目录，`/api` 作为系统目录（包含 `config.yaml` 与 `help` 两个系统文件）。默认没有匿名权限：
 
 ```bash
 curl -H 'Authorization: Bearer <super-admin-key>' \
@@ -108,7 +108,7 @@ mounts:
     type: quark_cookie
     root_path: /
     enabled: true
-  - mount_path: /system/config.yaml
+  - mount_path: /system/api
     type: system_config
     root_path: /
     enabled: true

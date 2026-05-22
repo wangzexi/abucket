@@ -13,8 +13,8 @@ mod ui;
 
 use crate::mounts::{
     GithubReleasesConfig, QuarkOpenConfig, ResolvedMount, backend_from_mount, github_client,
-    is_fnnas_quark_refresh_url, persist_quark_open_config, quark_client, quark_open_client,
-    resolve_explicit_mount, resolve_mount, resolve_remote_key,
+    is_fnnas_quark_refresh_url, normalize_virtual_path, persist_quark_open_config, quark_client,
+    quark_open_client, resolve_explicit_mount, resolve_mount, resolve_remote_key,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
@@ -1483,7 +1483,16 @@ fn config_system_paths(config: &ServiceConfig) -> (String, String) {
         match classify_system_file(&mount.mount_path) {
             SystemFile::ConfigYaml => config_path = mount.mount_path.clone(),
             SystemFile::Help => help_path = mount.mount_path.clone(),
-            SystemFile::Unknown => {}
+            SystemFile::Unknown => {
+                let normalized = normalize_virtual_path(&mount.mount_path);
+                if normalized == "/" {
+                    config_path = DEFAULT_CONFIG_PATH.to_string();
+                    help_path = DEFAULT_HELP_PATH.to_string();
+                } else {
+                    config_path = format!("{normalized}/config.yaml");
+                    help_path = format!("{normalized}/help");
+                }
+            }
         }
     }
     (config_path, help_path)
@@ -3212,14 +3221,7 @@ mod tests {
                 options: json!({"proxy": "http://127.0.0.1:1080"}),
             },
             MountConfig {
-                mount_path: "/api/config.yaml".to_string(),
-                mount_type: "system_config".to_string(),
-                root_path: "/".to_string(),
-                enabled: true,
-                options: Value::Null,
-            },
-            MountConfig {
-                mount_path: "/api/help".to_string(),
+                mount_path: "/api".to_string(),
                 mount_type: "system_config".to_string(),
                 root_path: "/".to_string(),
                 enabled: true,
@@ -3244,6 +3246,10 @@ mod tests {
             Some(ResolvedMount::UrlTree { url, proxy })
                 if url == "https://github.com/example-org/releases/client.tar.gz"
                     && proxy.as_deref() == Some("http://127.0.0.1:1080")
+        ));
+        assert!(matches!(
+            resolve_mount(&config, "/api/"),
+            Some(ResolvedMount::SystemConfig { virtual_path }) if virtual_path == "/api"
         ));
     }
 

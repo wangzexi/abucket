@@ -116,14 +116,7 @@ pub(crate) fn default_mounts() -> Vec<MountConfig> {
             options: Value::Null,
         },
         MountConfig {
-            mount_path: "/api/config.yaml".to_string(),
-            mount_type: "system_config".to_string(),
-            root_path: "/".to_string(),
-            enabled: true,
-            options: Value::Null,
-        },
-        MountConfig {
-            mount_path: "/api/help".to_string(),
+            mount_path: "/api".to_string(),
             mount_type: "system_config".to_string(),
             root_path: "/".to_string(),
             enabled: true,
@@ -232,7 +225,8 @@ const CONFIG_YAML_COMMENTS: &str = r#"# atree config
 # mounts[].root_path:
 #   quark_cookie: human-readable Quark path to expose at mount_path.
 #   quark_open: human-readable Quark path to expose at mount_path.
-#   system_config: exposed as a service file; treat mount_path as the exact file path (for example: /api/config.yaml or /api/help).
+#   system_config: exposed as a service directory; at minimum mount_path + `/{config.yaml,help}` are exposed.
+#                  You can still mount a file directly, such as /api/config.yaml.
 #   url_tree: upstream http(s) URL prefix or file URL.
 #   github_releases: GitHub repo in owner/repo form.
 # mounts[].enabled: false disables the mount without deleting it.

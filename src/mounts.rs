@@ -137,7 +137,7 @@ fn resolve_mount_inner(
             })
         }
         "system_config" => Some(ResolvedMount::SystemConfig {
-            virtual_path: normalize_virtual_path(&mount.mount_path),
+            virtual_path: path.to_string(),
         }),
         "url_tree" => {
             let rest = strip_mount_path(&mount.mount_path, &path);
@@ -354,9 +354,43 @@ fn set_yaml_string(value: &mut YamlValue, path: &[&str], new_value: &str) {
 
 fn mount_matches_for_type(mount: &config::MountConfig, path: &str) -> bool {
     if mount.mount_type == "system_config" {
-        return normalize_virtual_path(&mount.mount_path) == path;
+        let mount_path = normalize_virtual_path(&mount.mount_path);
+        let system_type = classify_system_path(&mount_path);
+        return match system_type {
+            Some(SystemFileType::Directory) => {
+                path == mount_path
+                    || (path.starts_with(&format!("{mount_path}/"))
+                        && matches!(
+                            classify_system_path(path),
+                            Some(SystemFileType::ConfigYaml | SystemFileType::Help)
+                        ))
+            }
+            Some(SystemFileType::ConfigYaml) | Some(SystemFileType::Help) => mount_path == path,
+            None => false,
+        };
     }
     mount_matches(&mount.mount_path, path)
+}
+
+#[derive(Copy, Clone)]
+enum SystemFileType {
+    ConfigYaml,
+    Help,
+    Directory,
+}
+
+fn classify_system_path(path: &str) -> Option<SystemFileType> {
+    let path = normalize_virtual_path(path);
+    if path.ends_with("/config.yaml") {
+        return Some(SystemFileType::ConfigYaml);
+    }
+    if path.ends_with("/help") || path.ends_with("/help.md") {
+        return Some(SystemFileType::Help);
+    }
+    if path == "/" {
+        return None;
+    }
+    Some(SystemFileType::Directory)
 }
 
 fn mount_matches(mount_path: &str, path: &str) -> bool {

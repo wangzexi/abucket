@@ -44,7 +44,7 @@ GET  /api/help
 
 No separate key CRUD routes are needed. Keys, auth rules, and cache settings are all just fields in the config document.
 
-`GET /api/help` is the small AI-facing help endpoint. It is now a `system_config` mount, so you can move it by editing mounts (for example to `/help` or `/system/help`) with the same permissions model.
+`GET /api/help` is the small AI-facing help endpoint. It is now a `system_config` mount directory, so you can move both system files by editing mounts (for example to `/system/api`, then use `/system/api/config.yaml` and `/system/api/help`) with the same permissions model.
 
 ## Browser Versus S3 Behavior
 
@@ -315,7 +315,7 @@ Current mount types:
 
 - `quark_cookie`: read/write Quark Drive through the captured web cookie.
 - `quark_open`: read/write Quark Drive through QuarkOpen OAuth credentials.
-- `system_config`: exposes service files at exact mount paths. It is used for `config.yaml` and `help`, and can be mounted to custom paths.
+- `system_config`: exposes service files under a mount directory. It is used for `config.yaml` and `help`, and default mount is `/api`.
 - `url_tree`: read-only `GET`/`HEAD` access to URL-backed files. This is useful for raw URLs or fixed download prefixes that need a server-side proxy in mainland China.
 - `github_releases`: read-only latest GitHub Release asset tree. This is better than `url_tree` for release assets because it supports listing the files through S3/ListBucket.
 
@@ -504,7 +504,7 @@ mounts:
     options:
       cookie: "<quark cookie>"
       root_fid: "0"
-  - mount_path: /api/config.yaml
+  - mount_path: /api
     type: system_config
     root_path: /
     enabled: true

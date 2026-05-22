@@ -13,7 +13,7 @@
 - `GET /quark/<key>` + `Range`：范围读取，供 restic 读取 pack 片段
 - S3 multipart upload 的最小流程：`POST ?uploads`、`PUT ?partNumber=&uploadId=`、`POST ?uploadId=`、`DELETE ?uploadId=`
 - `GET /api/help`（默认）：返回面向 curl/AI 的接口说明
-- `GET /api/config.yaml` / `PUT /api/config.yaml`：像修改一个系统文件一样管理 mount、key、权限和 cache，系统文件挂在 `/api` 目录下（还支持把它移动到其他系统路径）
+- `GET /api/config.yaml` / `PUT /api/config.yaml`：像修改一个系统文件一样管理 mount、key、权限和 cache，系统文件挂在 `system_config` 目录挂载点下（默认 `/api`）。
 - `GET` / `HEAD` 外部 HTTP 文件挂载：把 GitHub release/raw 等 URL 挂到服务文件树中，可按挂载单独配置代理
 
 这不是完整 S3 实现，暂时没有校验 AWS Signature。服务自己的访问控制由 `Authorization: Bearer <key>`、或 AWS SigV4 `Credential` 里的 access key 映射到本地 key 后完成。
@@ -100,7 +100,7 @@ tokens:
   refresh_token: '<private>'
 ```
 
-配置文件本身也是挂载树的一部分，所以你也可以把它移动到别的路径，只要保留至少一个启用的 `system_config` mount。例如：
+配置文件本身也是挂载树的一部分。`system_config` 是目录挂载，默认在 `/api`，也可以改到其它路径，但始终是目录挂载而不是文件挂载。例如：
 
 ```yaml
 mounts:

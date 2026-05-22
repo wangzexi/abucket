@@ -44,7 +44,7 @@ GET  /api/help
 
 No separate key CRUD routes are needed. Keys, auth rules, and cache settings are all just fields in the config document.
 
-`GET /api/help` is the small AI-facing help endpoint. It is now a `system_config` mount directory, so you can move both system files by editing mounts (for example to `/system/api`, then use `/system/api/config.yaml` and `/system/api/help`) with the same permissions model.
+`GET /api/help` is the small AI-facing help endpoint. It is a `system_config` mount directory, so you can move the whole system mount by editing mounts (for example to `/system/api`, then use `/system/api/config.yaml` and `/system/api/help`) with the same permissions model.
 
 ## Browser Versus S3 Behavior
 
@@ -212,7 +212,7 @@ Browser request to `/` can show:
 - file browser entry
 - login/key input
 - concise API documentation
-- a top-right copy button for the current domain's AI help curl command
+- concise API documentation text on the page
 
 S3 request to `/` can still return ListBuckets XML.
 
@@ -221,9 +221,9 @@ The browser homepage is the main HTML shell. It should be enough for normal huma
 - browse files
 - enter/save an access key
 - see current auth state
-- copy an AI-help command
+- see current API help text
 
-The top-right copy action should generate a command using the current origin:
+The help text should render inline using the current origin:
 
 ```bash
 curl -H 'Authorization: Bearer <super-admin-key>' 'https://current.example.com/api/help'
@@ -689,7 +689,7 @@ Completed in the current implementation:
 - Default-deny policy checks on S3/object routes.
 - Browser detection for directory paths and an HTML file browser shell.
 - Directory index file lookup for browser directory requests.
-- A top-right copy button for `curl <origin>/api/help`.
+- `GET /api/help` returns the machine-readable interface guidance directly.
 - Browser access key storage in `localStorage`.
 
 Later:

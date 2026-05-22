@@ -6,7 +6,7 @@ use reqwest::{Client, Proxy, Url};
 use serde::Deserialize;
 use serde_yaml::Value as YamlValue;
 
-use crate::{config, QuarkBackend, QuarkClient, QuarkOpenClient};
+use crate::{QuarkBackend, QuarkClient, QuarkOpenClient, config};
 
 #[derive(Debug, Clone)]
 pub(crate) struct QuarkOpenConfig {
@@ -39,7 +39,9 @@ pub(crate) enum ResolvedMount {
         remote_key: String,
         config: QuarkOpenConfig,
     },
-    SystemConfig,
+    SystemConfig {
+        virtual_path: String,
+    },
     UrlTree {
         url: String,
         proxy: Option<String>,
@@ -82,18 +84,27 @@ pub(crate) fn github_client(config: &GithubReleasesConfig) -> Result<Client> {
     Ok(builder.build()?)
 }
 
-pub(crate) fn resolve_remote_key(config: &config::ServiceConfig, virtual_path: &str) -> Option<String> {
+pub(crate) fn resolve_remote_key(
+    config: &config::ServiceConfig,
+    virtual_path: &str,
+) -> Option<String> {
     match resolve_mount(config, virtual_path)? {
         ResolvedMount::Quark { remote_key, .. } => Some(remote_key),
         _ => None,
     }
 }
 
-pub(crate) fn resolve_mount(config: &config::ServiceConfig, virtual_path: &str) -> Option<ResolvedMount> {
+pub(crate) fn resolve_mount(
+    config: &config::ServiceConfig,
+    virtual_path: &str,
+) -> Option<ResolvedMount> {
     resolve_mount_inner(config, virtual_path, true)
 }
 
-pub(crate) fn resolve_explicit_mount(config: &config::ServiceConfig, virtual_path: &str) -> Option<ResolvedMount> {
+pub(crate) fn resolve_explicit_mount(
+    config: &config::ServiceConfig,
+    virtual_path: &str,
+) -> Option<ResolvedMount> {
     resolve_mount_inner(config, virtual_path, false)
 }
 
@@ -103,15 +114,11 @@ fn resolve_mount_inner(
     include_root_mount: bool,
 ) -> Option<ResolvedMount> {
     let path = normalize_virtual_path(virtual_path);
-    let mount = config
-        .mounts
-        .iter()
-        .rev()
-        .find(|mount| {
-            mount.enabled
-                && (include_root_mount || normalize_virtual_path(&mount.mount_path) != "/")
-                && mount_matches_for_type(mount, &path)
-        })?;
+    let mount = config.mounts.iter().rev().find(|mount| {
+        mount.enabled
+            && (include_root_mount || normalize_virtual_path(&mount.mount_path) != "/")
+            && mount_matches_for_type(mount, &path)
+    })?;
     match mount.mount_type.as_str() {
         "quark_cookie" => {
             let rest = strip_mount_path(&mount.mount_path, &path);
@@ -129,7 +136,9 @@ fn resolve_mount_inner(
                 config: quark_open_config_from_options(&mount.options)?,
             })
         }
-        "system_config" => Some(ResolvedMount::SystemConfig),
+        "system_config" => Some(ResolvedMount::SystemConfig {
+            virtual_path: normalize_virtual_path(&mount.mount_path),
+        }),
         "url_tree" => {
             let rest = strip_mount_path(&mount.mount_path, &path);
             Some(ResolvedMount::UrlTree {
@@ -159,11 +168,14 @@ pub(crate) fn backend_from_mount(mount: ResolvedMount) -> Option<(String, QuarkB
             remote_key,
             cookie,
             root_fid,
-        } => Some((remote_key, QuarkBackend::Cookie(quark_client(cookie, root_fid).ok()?))),
-        ResolvedMount::QuarkOpen {
+        } => Some((
             remote_key,
-            config,
-        } => Some((remote_key, QuarkBackend::Open(quark_open_client(config).ok()?))),
+            QuarkBackend::Cookie(quark_client(cookie, root_fid).ok()?),
+        )),
+        ResolvedMount::QuarkOpen { remote_key, config } => Some((
+            remote_key,
+            QuarkBackend::Open(quark_open_client(config).ok()?),
+        )),
         _ => None,
     }
 }
@@ -180,9 +192,11 @@ fn mount_option_bool(options: &serde_json::Value, key: &str) -> bool {
     options
         .get(key)
         .and_then(|value| {
-            value
-                .as_bool()
-                .or_else(|| value.as_str().map(|value| matches!(value, "true" | "yes" | "1")))
+            value.as_bool().or_else(|| {
+                value
+                    .as_str()
+                    .map(|value| matches!(value, "true" | "yes" | "1"))
+            })
         })
         .unwrap_or(false)
 }

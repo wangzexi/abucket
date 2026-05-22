@@ -59,12 +59,14 @@ pub(crate) fn file_browser_html(bucket: &str, virtual_path: &str) -> String {
     a {{ color: LinkText; }}
     .muted {{ color: color-mix(in srgb, CanvasText 62%, transparent); }}
     .error {{ color: #b42318; }}
+    .help {{ font-size: 12px; color: color-mix(in srgb, CanvasText 80%, transparent); word-break: break-all; }}
+    .help code {{ font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }}
   </style>
 </head>
 <body>
   <header>
     <strong>atree</strong>
-    <button id="copyHelp" type="button">复制 API help curl</button>
+    <div id="helpLine" class="help"></div>
   </header>
   <main>
     <div class="bar">
@@ -91,6 +93,7 @@ pub(crate) fn file_browser_html(bucket: &str, virtual_path: &str) -> String {
     const message = document.getElementById('message');
     const rows = document.getElementById('rows');
     const crumbs = document.getElementById('crumbs');
+    const helpLine = document.getElementById('helpLine');
 
     function currentKey() {{ return localStorage.getItem(keyName) || ''; }}
     function setAuthState() {{ authState.textContent = currentKey() ? '已保存 key' : '匿名访问'; }}
@@ -177,13 +180,9 @@ pub(crate) fn file_browser_html(bucket: &str, virtual_path: &str) -> String {
         </tr>
       `).join('');
     }}
+    helpLine.innerHTML = `curl API help: <code>curl -H 'Authorization: Bearer <super-admin-key>' '${{location.origin}}/api/help'</code>`;
     document.getElementById('saveKey').onclick = () => {{ localStorage.setItem(keyName, keyInput.value); keyInput.value = ''; load(); }};
     document.getElementById('clearKey').onclick = () => {{ localStorage.removeItem(keyName); load(); }};
-    document.getElementById('copyHelp').onclick = async () => {{
-      const cmd = `curl -H 'Authorization: Bearer <super-admin-key>' '${{location.origin}}/api/help'`;
-      await navigator.clipboard.writeText(cmd);
-      message.textContent = '已复制：' + cmd;
-    }};
     load().catch(err => {{ message.innerHTML = '<span class="error">' + err.message + '</span>'; }});
   </script>
 </body>

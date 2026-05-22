@@ -34,7 +34,7 @@ cargo run
 ~/.local/share/atree/atree.sqlite
 ```
 
-默认配置有两个 mount：`/` 指向夸克根目录，`/api/config.yaml` 是配置系统文件。默认没有匿名权限：
+默认配置有三个 mount：`/` 指向夸克根目录，`/api/config.yaml` 是配置系统文件，`/api/help` 是内建的系统帮助文件。默认没有匿名权限：
 
 ```bash
 curl -H 'Authorization: Bearer <super-admin-key>' \

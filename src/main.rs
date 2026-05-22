@@ -11,6 +11,11 @@ mod config;
 mod mounts;
 mod ui;
 
+use crate::mounts::{
+    GithubReleasesConfig, QuarkOpenConfig, ResolvedMount, backend_from_mount, github_client,
+    is_fnnas_quark_refresh_url, persist_quark_open_config, quark_client, quark_open_client,
+    resolve_explicit_mount, resolve_mount, resolve_remote_key,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Json, Router,
@@ -38,11 +43,6 @@ use tokio::{
 };
 use tracing::{info, warn};
 use ui::{file_browser_html, wants_html};
-use crate::mounts::{
-    backend_from_mount, github_client, is_fnnas_quark_refresh_url, persist_quark_open_config,
-    quark_client, quark_open_client, resolve_explicit_mount, resolve_mount, resolve_remote_key,
-    GithubReleasesConfig, QuarkOpenConfig, ResolvedMount,
-};
 
 const QUARK_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch";
 const REFERER: &str = "https://pan.quark.cn";
@@ -50,6 +50,7 @@ const API: &str = "https://drive.quark.cn/1/clouddrive";
 const OPEN_API: &str = "https://open-api-drive.quark.cn";
 const PR: &str = "ucpro";
 const DEFAULT_CONFIG_PATH: &str = "/api/config.yaml";
+const DEFAULT_HELP_PATH: &str = "/api/help";
 
 #[derive(Clone)]
 struct AppState {
@@ -1373,7 +1374,6 @@ async fn state_bucket(state: &AppState) -> String {
 fn build_app(state: AppState, max_upload_bytes: usize) -> Router {
     Router::new()
         .route("/", any(root_handler))
-        .route("/api/help", any(help_handler))
         .route("/{bucket}", any(bucket_handler))
         .route("/{bucket}/", any(bucket_handler))
         .route("/{bucket}/{*key}", any(object_handler))
@@ -1455,8 +1455,92 @@ async fn config_handler(
     }
 }
 
-async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let bucket = state_bucket(&state).await;
+enum SystemFile {
+    ConfigYaml,
+    Help,
+    Unknown,
+}
+
+fn classify_system_file(path: &str) -> SystemFile {
+    if path.ends_with("/config.yaml") {
+        SystemFile::ConfigYaml
+    } else if path.ends_with("/help") || path.ends_with("/help.md") {
+        SystemFile::Help
+    } else {
+        SystemFile::Unknown
+    }
+}
+
+fn config_system_paths(config: &ServiceConfig) -> (String, String) {
+    let (mut config_path, mut help_path) = (
+        DEFAULT_CONFIG_PATH.to_string(),
+        DEFAULT_HELP_PATH.to_string(),
+    );
+    for mount in &config.mounts {
+        if mount.mount_type != "system_config" || !mount.enabled {
+            continue;
+        }
+        match classify_system_file(&mount.mount_path) {
+            SystemFile::ConfigYaml => config_path = mount.mount_path.clone(),
+            SystemFile::Help => help_path = mount.mount_path.clone(),
+            SystemFile::Unknown => {}
+        }
+    }
+    (config_path, help_path)
+}
+
+fn help_file_content() -> &'static str {
+    r##"# atree
+
+`atree` is a virtual S3 gateway with local system files embedded in the mount tree.
+
+- Read/write config: `GET`/`PUT` a mounted config file (default `api/config.yaml`).
+- Read help: `GET` a mounted help file (default `api/help`).
+- Access objects: standard S3 path-style API under your bucket.
+- Browser: request `Accept: text/html` to open the directory UI.
+- Auth: `Authorization: Bearer <key>`
+
+```bash
+curl -H 'Authorization: Bearer <super-admin-key>' <origin>/api/config.yaml
+```
+"##
+}
+
+async fn help_handler(
+    state: &AppState,
+    headers: &HeaderMap,
+    virtual_path: &str,
+    method: Method,
+) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return json_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "help file supports GET and HEAD",
+        );
+    }
+
+    if method == Method::HEAD {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+
+    if virtual_path.ends_with(".md") {
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+            help_file_content(),
+        )
+            .into_response();
+    }
+
+    let config = state.config.read().await;
+    let (config_path, help_path) = config_system_paths(&config);
+    drop(config);
+
+    let bucket = state_bucket(state).await;
     let origin = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -1469,9 +1553,14 @@ async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Resp
             "admin_header": "Authorization: Bearer <super-admin-key>"
         },
         "config": {
-            "get": format!("GET {DEFAULT_CONFIG_PATH}"),
-            "put": format!("PUT {DEFAULT_CONFIG_PATH}"),
-            "note": "Config is a YAML document exposed as a system file. GET requires GetObject on /api/config.yaml; PUT requires PutObject on /api/config.yaml. The bootstrap super-admin key is still allowed for first setup. PUT rejects invalid config and keeps the old one."
+            "path": config_path,
+            "get": format!("GET {config_path}"),
+            "put": format!("PUT {config_path}"),
+            "note": "Config is a YAML document exposed as a system file. Reading needs GetObject, writing needs PutObject on the mounted config file. The bootstrap super-admin key is still allowed for first setup. PUT rejects invalid config and keeps the old one."
+        },
+        "help": {
+            "path": help_path,
+            "get": format!("GET {help_path}"),
         },
         "s3": {
             "bucket": bucket,
@@ -1486,8 +1575,8 @@ async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Resp
             "login": "The HTML UI stores the service access key in localStorage and sends it as Authorization: Bearer <key> for list/read requests."
         },
         "examples": {
-            "get_config": format!("curl -H 'Authorization: Bearer <super-admin-key>' '{origin}{DEFAULT_CONFIG_PATH}'"),
-            "put_config": format!("curl -X PUT -H 'Authorization: Bearer <super-admin-key>' --data @config.yaml '{origin}{DEFAULT_CONFIG_PATH}'"),
+            "get_config": format!("curl -H 'Authorization: Bearer <super-admin-key>' '{origin}{config_path}'"),
+            "put_config": format!("curl -X PUT -H 'Authorization: Bearer <super-admin-key>' --data @config.yaml '{origin}{config_path}'"),
             "list": format!("curl -H 'Authorization: Bearer <key>' '{origin}/{bucket}?list-type=2&delimiter=/&prefix=public/'"),
             "upload": format!("curl -X PUT -H 'Authorization: Bearer <key>' -H 'Content-Type: text/plain' --data-binary @./example.txt '{origin}/{bucket}/public/example.txt'"),
             "upload_with_curl_T": format!("curl -H 'Authorization: Bearer <key>' -T ./example.txt '{origin}/{bucket}/public/example.txt'"),
@@ -1496,6 +1585,20 @@ async fn help_handler(State(state): State<AppState>, headers: HeaderMap) -> Resp
         }
     }))
     .into_response()
+}
+
+async fn system_file_handler(
+    state: &AppState,
+    method: Method,
+    headers: &HeaderMap,
+    body: Bytes,
+    virtual_path: &str,
+) -> Response {
+    match classify_system_file(virtual_path) {
+        SystemFile::ConfigYaml => config_handler(state, method, headers, body, virtual_path).await,
+        SystemFile::Help => help_handler(state, headers, virtual_path, method).await,
+        SystemFile::Unknown => s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "unknown system file"),
+    }
 }
 
 async fn bucket_handler(
@@ -1512,8 +1615,9 @@ async fn bucket_handler(
         let mount = resolve_explicit_mount(&config, &virtual_path);
         drop(config);
         match mount {
-            Some(ResolvedMount::SystemConfig) => {
-                return config_handler(&state, method, &headers, Bytes::new(), &virtual_path).await;
+            Some(ResolvedMount::SystemConfig { virtual_path }) => {
+                return system_file_handler(&state, method, &headers, Bytes::new(), &virtual_path)
+                    .await;
             }
             Some(ResolvedMount::UrlTree { url, proxy }) => {
                 let action = match method {
@@ -1591,8 +1695,8 @@ async fn object_handler(
             let config = state.config.read().await;
             let mount = resolve_explicit_mount(&config, &virtual_path);
             drop(config);
-            if matches!(mount, Some(ResolvedMount::SystemConfig)) {
-                return config_handler(&state, method, &headers, body, &virtual_path).await;
+            if let Some(ResolvedMount::SystemConfig { virtual_path }) = mount {
+                return system_file_handler(&state, method, &headers, body, &virtual_path).await;
             }
             return s3_error(StatusCode::NOT_FOUND, "NoSuchBucket", "bucket not found");
         }
@@ -1621,6 +1725,19 @@ async fn object_handler(
     }
 
     let params = parse_query(raw_query.as_deref().unwrap_or_default());
+    let config = state.config.read().await;
+    let resolved_mount = if is_bucket_path {
+        resolve_mount(&config, &virtual_path)
+    } else {
+        resolve_explicit_mount(&config, &virtual_path)
+    };
+    if let Some(ResolvedMount::SystemConfig { virtual_path }) = &resolved_mount {
+        if matches!(classify_system_file(virtual_path), SystemFile::Help) {
+            drop(config);
+            return system_file_handler(&state, method, &headers, body, virtual_path).await;
+        }
+    }
+
     let action = match method {
         Method::GET => "GetObject",
         Method::HEAD => "HeadObject",
@@ -1631,12 +1748,7 @@ async fn object_handler(
     if !is_authorized(&state, &headers, action, &virtual_path).await {
         return access_denied(&headers, &current_bucket);
     }
-    let config = state.config.read().await;
-    let mount = match if is_bucket_path {
-        resolve_mount(&config, &virtual_path)
-    } else {
-        resolve_explicit_mount(&config, &virtual_path)
-    } {
+    let mount = match resolved_mount {
         Some(mount) => mount,
         None if is_bucket_path => {
             return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "mount not found");
@@ -1667,8 +1779,8 @@ async fn object_handler(
             };
             (remote_key, QuarkBackend::Open(quark))
         }
-        ResolvedMount::SystemConfig => {
-            return config_handler(&state, method, &headers, body, &virtual_path).await;
+        ResolvedMount::SystemConfig { virtual_path } => {
+            return system_file_handler(&state, method, &headers, body, &virtual_path).await;
         }
         ResolvedMount::UrlTree { url, proxy } => {
             return url_object(method, &headers, url, proxy).await;
@@ -3106,11 +3218,22 @@ mod tests {
                 enabled: true,
                 options: Value::Null,
             },
+            MountConfig {
+                mount_path: "/api/help".to_string(),
+                mount_type: "system_config".to_string(),
+                root_path: "/".to_string(),
+                enabled: true,
+                options: Value::Null,
+            },
         ]);
 
         assert!(matches!(
             resolve_mount(&config, "/api/config.yaml"),
-            Some(ResolvedMount::SystemConfig)
+            Some(ResolvedMount::SystemConfig { virtual_path }) if virtual_path == "/api/config.yaml"
+        ));
+        assert!(matches!(
+            resolve_mount(&config, "/api/help"),
+            Some(ResolvedMount::SystemConfig { virtual_path }) if virtual_path == "/api/help"
         ));
         assert!(matches!(
             resolve_mount(&config, "/api/config.yaml/extra"),

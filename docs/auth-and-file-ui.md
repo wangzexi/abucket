@@ -8,7 +8,7 @@ Keep the service small. It has only two API families:
 
 ```text
 1. S3-style object routes
-2. Whole-config read/write routes
+2. Whole-config/system-file mount routes
 ```
 
 The S3 URL space is also the file browser URL space.
@@ -44,7 +44,7 @@ GET  /api/help
 
 No separate key CRUD routes are needed. Keys, auth rules, and cache settings are all just fields in the config document.
 
-`GET /api/help` is the small AI-facing help endpoint. It replaces a separate settings page or large API index.
+`GET /api/help` is the small AI-facing help endpoint. It is now a `system_config` mount, so you can move it by editing mounts (for example to `/help` or `/system/help`) with the same permissions model.
 
 ## Browser Versus S3 Behavior
 
@@ -315,7 +315,7 @@ Current mount types:
 
 - `quark_cookie`: read/write Quark Drive through the captured web cookie.
 - `quark_open`: read/write Quark Drive through QuarkOpen OAuth credentials.
-- `system_config`: exposes the live YAML config as one file. It must match the exact mount path, not children under it.
+- `system_config`: exposes service files at exact mount paths. It is used for `config.yaml` and `help`, and can be mounted to custom paths.
 - `url_tree`: read-only `GET`/`HEAD` access to URL-backed files. This is useful for raw URLs or fixed download prefixes that need a server-side proxy in mainland China.
 - `github_releases`: read-only latest GitHub Release asset tree. This is better than `url_tree` for release assets because it supports listing the files through S3/ListBucket.
 

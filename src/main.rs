@@ -2438,6 +2438,12 @@ async fn github_releases_object(
     else {
         return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "object not found");
     };
+    if method == Method::HEAD {
+        return match github_release_head_response(headers, size, modified, content_type.as_deref()) {
+            Ok(response) => response,
+            Err(err) => s3_error_for(&err),
+        };
+    }
     let mut response = url_object(method, headers, url, config.proxy.clone()).await;
     if response.status().is_success() {
         let partial = response.status() == StatusCode::PARTIAL_CONTENT
@@ -2455,6 +2461,49 @@ async fn github_releases_object(
         }
     }
     response
+}
+
+fn github_release_head_response(
+    headers: &HeaderMap,
+    size: i64,
+    modified: i64,
+    content_type: Option<&str>,
+) -> Result<Response> {
+    let range = parse_range_header(headers, size)?;
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = if range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    if let Some((start, end)) = range {
+        response.headers_mut().insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {start}-{end}/{size}"))?,
+        );
+        response.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&(end - start + 1).to_string())?,
+        );
+    } else {
+        response.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&size.to_string())?,
+        );
+    }
+    response.headers_mut().insert(
+        header::LAST_MODIFIED,
+        HeaderValue::from_str(&http_time(modified))?,
+    );
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Some(content_type) = content_type
+        && let Ok(value) = HeaderValue::from_str(content_type)
+    {
+        response.headers_mut().insert(header::CONTENT_TYPE, value);
+    }
+    Ok(response)
 }
 
 async fn list_github_releases(
@@ -3621,6 +3670,28 @@ cache:
         assert!(err
             .to_string()
             .contains("quark open api http 502 Bad Gateway: upstream exploded"));
+    }
+
+    #[test]
+    fn github_release_head_response_respects_range() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-99"));
+        let response =
+            github_release_head_response(&headers, 1000, 1_700_000_000_000, Some("text/plain"))
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_LENGTH).unwrap(),
+            "100"
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 0-99/1000"
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/plain"
+        );
     }
 
     #[test]

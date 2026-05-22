@@ -1398,12 +1398,6 @@ fn build_app(state: AppState, max_upload_bytes: usize) -> Router {
         .with_state(state)
 }
 
-async fn browser_root_entries_json(state: &AppState) -> String {
-    browser_virtual_entries_json(state, "/")
-        .await
-        .unwrap_or_else(|| "[]".to_string())
-}
-
 async fn browser_virtual_entries_response(
     state: &AppState,
     headers: &HeaderMap,
@@ -1520,16 +1514,18 @@ async fn browser_virtual_entries_json(state: &AppState, virtual_path: &str) -> O
 
 async fn root_handler(
     State(state): State<AppState>,
+    RawQuery(raw_query): RawQuery,
     method: Method,
     headers: HeaderMap,
 ) -> Response {
     let bucket = state_bucket(&state).await;
+    let raw_query = raw_query.unwrap_or_default();
+    let params = parse_query(&raw_query);
+    if method == Method::GET && params.contains_key("atree-browser-list") {
+        return browser_virtual_entries_response(&state, &headers, "/").await;
+    }
     if method == Method::GET && wants_html(&headers) {
-        let root_entries = browser_root_entries_json(&state).await;
-        return html_response(
-            StatusCode::OK,
-            file_browser_html(&bucket, "/", &root_entries, "null"),
-        );
+        return html_response(StatusCode::OK, file_browser_html(&bucket, "/", "null", "null"));
     }
     if method != Method::GET {
         return s3_error(
@@ -3493,6 +3489,7 @@ mod tests {
         let html = response_text(html_resp).await;
         assert!(html.contains("atree"));
         assert!(html.contains("atree_key"));
+        assert!(html.contains("var DIRECTORY_ENTRIES = null;"));
 
         let xml_resp = app
             .oneshot(
@@ -3508,6 +3505,40 @@ mod tests {
         let xml = response_text(xml_resp).await;
         assert!(xml.contains("<ListAllMyBucketsResult"));
         assert!(xml.contains("<Name>quark</Name>"));
+    }
+
+    #[tokio::test]
+    async fn root_browser_list_requires_auth_and_root_can_read_it() {
+        let app = build_app(test_state(), 1024 * 1024);
+
+        let no_auth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/?atree-browser-list=1")
+                    .header(header::ACCEPT, "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_auth.status(), StatusCode::FORBIDDEN);
+
+        let root = app
+            .oneshot(
+                Request::builder()
+                    .uri("/?atree-browser-list=1")
+                    .header(header::ACCEPT, "application/json")
+                    .header(header::AUTHORIZATION, "Bearer root-test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(root.status(), StatusCode::OK);
+        let body = response_text(root).await;
+        assert!(body.contains("\"name\":\"quark\""));
+        assert!(body.contains("\"name\":\"api\""));
     }
 
     #[tokio::test]
@@ -3576,13 +3607,13 @@ mod tests {
                     .header(header::USER_AGENT, "Mozilla/5.0")
                     .body(Body::empty())
                     .unwrap(),
-            )
-            .await
-            .unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
-        assert!(body.contains("\"name\":\"quark\""));
-        assert!(body.contains("\"name\":\"api\""));
+        assert!(body.contains("var DIRECTORY_ENTRIES = null;"));
+        assert!(body.contains("u.searchParams.set('atree-browser-list', '1');"));
     }
 
     #[tokio::test]
@@ -4049,7 +4080,7 @@ cache:
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
-        assert!(body.contains("# `atree` is an S3-style file tree API"));
+        assert!(body.contains("# `atree` is an S3-style file API"));
         assert!(body.contains("curl -H 'Authorization: Bearer <root-key>'"));
         assert!(body.contains("curl -I -H 'Authorization: Bearer <key>'"));
         assert!(body.contains("-T ./example.txt"));

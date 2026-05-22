@@ -74,13 +74,18 @@ pub(crate) fn file_browser_html(
     .error {{ color: #b42318; }}
     .help {{ margin-top: 14px; font-size: 12px; color: #6b7280; word-break: break-all; }}
     .help code {{ font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }}
-    .brand {{ font-size: 20px; font-weight: 700; color: #111827; text-decoration: none; }}
-    .brand:hover {{ color: #374151; }}
+    .brand-wrap {{ display: flex; align-items: baseline; gap: 10px; min-width: 0; }}
+    .brand {{ font-size: 20px; font-weight: 700; color: #2563eb; text-decoration: none; }}
+    .brand:hover {{ color: #1d4ed8; }}
+    .tagline {{ font-size: 13px; color: #6b7280; white-space: nowrap; }}
   </style>
 </head>
 <body>
   <header>
-    <a class="brand" href="/">atree</a>
+    <div class="brand-wrap">
+      <a class="brand" href="/">atree</a>
+      <span class="tagline">S3-style file API</span>
+    </div>
     <div class="auth">
       <input id="keyInput" type="text" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="访问 key">
     </div>
@@ -318,24 +323,24 @@ pub(crate) fn file_browser_html(
         }});
     }}
     function renderCrumbs() {{
-      var rootLink = '<a href="/">/</a>';
       if (location.pathname === '/') {{
-        crumbs.innerHTML = rootLink;
+        crumbs.innerHTML = '<span>/</span>';
         return;
       }}
       if (!startsWith(location.pathname, '/' + BUCKET + '/')) {{
         var parts = location.pathname.split('/').filter(Boolean);
-        var links = [rootLink];
+        var links = ['<span>/</span>'];
         var acc = '';
         for (var i = 0; i < parts.length; i += 1) {{
           acc += '/' + encodeURIComponent(parts[i]);
-          links.push('<span>/</span><a href="' + acc + '/">' + escapeHtml(decodePathPart(parts[i])) + '</a>');
+          links.push('<span>/</span>');
+          links.push('<a href="' + acc + '/">' + escapeHtml(decodePathPart(parts[i])) + '</a>');
         }}
         crumbs.innerHTML = links.join('');
         return;
       }}
       var bucketParts = keyPrefixFromPath().split('/').filter(Boolean);
-      var bucketLinks = [rootLink, '<span>/</span><a href="/' + BUCKET + '/">' + escapeHtml(BUCKET) + '</a>'];
+      var bucketLinks = ['<span>/</span><a href="/' + BUCKET + '/">' + escapeHtml(BUCKET) + '</a>'];
       var bucketAcc = '';
       for (var j = 0; j < bucketParts.length; j += 1) {{
         bucketAcc += encodeURIComponent(bucketParts[j]) + '/';
@@ -373,7 +378,7 @@ pub(crate) fn file_browser_html(
         renderItems(DIRECTORY_ENTRIES);
         return Promise.resolve();
       }}
-      if (isSyntheticPath()) {{
+      if (location.pathname === '/' || isSyntheticPath()) {{
         return fetch(browserListUrl(), {{ headers: headers('application/json') }})
           .then(function(res) {{
             if (res.status === 403 || res.status === 401) {{

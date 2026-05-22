@@ -223,20 +223,21 @@ pub(crate) fn commented_yaml(config: &ServiceConfig) -> Result<String> {
 }
 
 const CONFIG_YAML_COMMENTS: &str = r#"# atree config
-# This YAML is meant for humans and AI agents. Comments are ignored on PUT.
+# This is the live service config. Comments are ignored on PUT.
+# If ATREE_ROOT_KEY is set, that key is treated as principal `root`.
 #
 # s3.bucket: path-style S3 bucket name used by clients. Default: quark.
 # s3.max_upload_bytes: max request body size for PUT/multipart parts. Changes need restart.
 #
 # mounts: ordered mount table. Later mounts have higher priority.
-# mounts[].mount_path: service path, must start with /. Example: /public
+# mounts[].mount_path: service path, must start with /. Example: /quark or /pub
 # mounts[].type: quark_cookie, quark_open, system_config, url_tree, or github_releases.
 # mounts[].root_path:
 #   quark_cookie: human-readable Quark path to expose at mount_path.
 #   quark_open: human-readable Quark path to expose at mount_path.
-#   system_config: exposed as one mounted config file path, such as /api/config.yaml.
-#   url_tree: upstream http(s) URL prefix or file URL.
-#   github_releases: GitHub repo in owner/repo form.
+#   system_config: keep as /; this mount exposes this config file at mount_path.
+#   url_tree: upstream http(s) URL prefix or file URL. Read-only.
+#   github_releases: GitHub repo in owner/repo form. Read-only.
 # mounts[].enabled: false disables the mount without deleting it.
 # mounts[].options:
 #   quark_cookie.cookie: Quark web cookie for this mount.
@@ -248,6 +249,8 @@ const CONFIG_YAML_COMMENTS: &str = r#"# atree config
 #   github_releases.proxy: optional outbound proxy URL for API and downloads.
 #   github_releases.asset_allow: optional list of asset names or * globs.
 #   use {} or null when unused.
+# system_config note:
+#   mount_path must end with /config.yaml, for example /api/config.yaml.
 #
 # auth.keys: named service keys. Do not store plaintext keys here.
 # auth.keys[].plain_key: allowed only in PUT; the service stores key_hash/key_hint and never returns plain_key.
@@ -257,11 +260,12 @@ const CONFIG_YAML_COMMENTS: &str = r#"# atree config
 # auth.rules[].principal: anonymous, root, or key:<name>.
 # auth.rules[].actions: ListBucket, HeadObject, GetObject, PutObject, DeleteObject, or *.
 # auth.rules[].resources: service paths such as /public/* or /*.
+# requests that match no rule are denied unless the caller is `root`.
 #
 # cache.enabled: reserved for read-through cache work.
 # cache.max_bytes: max local cache size in bytes; it is not Quark capacity.
 #
-# `atree` is an S3-style file tree API with one mounted system config file.
+# `atree` is an S3-style file API with one mounted system config file.
 #
 # Examples:
 #   curl -H 'Authorization: Bearer <root-key>' 'http://127.0.0.1:9000/api/config.yaml'

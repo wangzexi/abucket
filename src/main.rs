@@ -1464,7 +1464,7 @@ enum SystemFile {
 fn classify_system_file(path: &str) -> SystemFile {
     if path.ends_with("/config.yaml") {
         SystemFile::ConfigYaml
-    } else if path.ends_with("/help") || path.ends_with("/help.md") {
+    } else if path.ends_with("/help") {
         SystemFile::Help
     } else {
         SystemFile::Unknown
@@ -1498,27 +1498,10 @@ fn config_system_paths(config: &ServiceConfig) -> (String, String) {
     (config_path, help_path)
 }
 
-fn help_file_content() -> &'static str {
-    r##"# atree
-
-`atree` is a virtual S3 gateway with local system files embedded in the mount tree.
-
-- Read/write config: `GET`/`PUT` a mounted config file (default `api/config.yaml`).
-- Read help: `GET` a mounted help file (default `api/help`).
-- Access objects: standard S3 path-style API under your bucket.
-- Browser: request `Accept: text/html` to open the directory UI.
-- Auth: `Authorization: Bearer <key>`
-
-```bash
-curl -H 'Authorization: Bearer <super-admin-key>' <origin>/api/config.yaml
-```
-"##
-}
-
 async fn help_handler(
     state: &AppState,
     headers: &HeaderMap,
-    virtual_path: &str,
+    _virtual_path: &str,
     method: Method,
 ) -> Response {
     if method != Method::GET && method != Method::HEAD {
@@ -1534,15 +1517,6 @@ async fn help_handler(
             .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
             .body(Body::empty())
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-    }
-
-    if virtual_path.ends_with(".md") {
-        return (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
-            help_file_content(),
-        )
-            .into_response();
     }
 
     let config = state.config.read().await;
@@ -3269,7 +3243,7 @@ mod tests {
                 }),
             },
             MountConfig {
-                mount_path: "/api/config.yaml".to_string(),
+                mount_path: "/api".to_string(),
                 mount_type: "system_config".to_string(),
                 root_path: "/".to_string(),
                 enabled: true,
@@ -3428,6 +3402,10 @@ mod tests {
             resources: vec!["/*".to_string()],
         });
         assert!(validate_config(&config).is_err());
+
+        let mut config = ServiceConfig::default();
+        config.mounts[1].mount_path = "/api/config.yaml".to_string();
+        assert!(validate_config(&config).is_err());
     }
 
     #[tokio::test]
@@ -3515,7 +3493,7 @@ mounts:
     type: quark_cookie
     root_path: /
     enabled: true
-  - mount_path: /api/config.yaml
+  - mount_path: /api
     type: system_config
     root_path: /
     enabled: true
@@ -3578,7 +3556,7 @@ mounts:
     type: quark_cookie
     root_path: /
     enabled: true
-  - mount_path: /api/config.yaml
+  - mount_path: /api
     type: system_config
     root_path: /
     enabled: true
@@ -3647,7 +3625,7 @@ mounts:
     type: quark_cookie
     root_path: /
     enabled: true
-  - mount_path: /api/config.yaml
+  - mount_path: /api
     type: system_config
     root_path: /
     enabled: true
@@ -3719,7 +3697,7 @@ mounts:
     type: quark_cookie
     root_path: /
     enabled: true
-  - mount_path: /system/config.yaml
+  - mount_path: /system
     type: system_config
     root_path: /
     enabled: true

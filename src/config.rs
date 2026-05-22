@@ -226,7 +226,6 @@ const CONFIG_YAML_COMMENTS: &str = r#"# atree config
 #   quark_cookie: human-readable Quark path to expose at mount_path.
 #   quark_open: human-readable Quark path to expose at mount_path.
 #   system_config: exposed as a service directory; at minimum mount_path + `/{config.yaml,help}` are exposed.
-#                  You can still mount a file directly, such as /api/config.yaml.
 #   url_tree: upstream http(s) URL prefix or file URL.
 #   github_releases: GitHub repo in owner/repo form.
 # mounts[].enabled: false disables the mount without deleting it.
@@ -355,7 +354,13 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                     }
                 }
             }
-            "system_config" => validate_abs_path(&mount.root_path, "root_path")?,
+            "system_config" => {
+                validate_abs_path(&mount.root_path, "root_path")?;
+                if mount.mount_path.ends_with("/config.yaml") || mount.mount_path.ends_with("/help")
+                {
+                    bail!("system_config mount_path must be a directory, not a file");
+                }
+            }
             _ => unreachable!(),
         }
         if mount.enabled && mount.mount_type == "system_config" {

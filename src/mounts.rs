@@ -384,7 +384,7 @@ fn classify_system_path(path: &str) -> Option<SystemFileType> {
     if path.ends_with("/config.yaml") {
         return Some(SystemFileType::ConfigYaml);
     }
-    if path.ends_with("/help") || path.ends_with("/help.md") {
+    if path.ends_with("/help") {
         return Some(SystemFileType::Help);
     }
     if path == "/" {

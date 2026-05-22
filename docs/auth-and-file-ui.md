@@ -53,7 +53,7 @@ PUT  /api/config.yaml
 
 No separate key CRUD routes are needed. Keys, auth rules, and cache settings are all just fields in the config document.
 
-`system_config` is a mounted config file path. You can move it by editing mounts, for example to `/system/config.yaml`.
+`system_config` is a mounted config file path. You can move it by editing mounts, for example to `/system/live.yaml`.
 
 ## Browser Versus S3 Behavior
 
@@ -278,7 +278,7 @@ GET /api/config.yaml
 PUT /api/config.yaml
 ```
 
-The config API is YAML-only at the HTTP boundary. `GET /api/config.yaml` returns explanatory comments for humans and AI agents, and `PUT /api/config.yaml` ignores those comments naturally. This path behaves like a special system file mount: reading it requires `GetObject` on `/api/config.yaml`, and updating it requires `PutObject` on `/api/config.yaml`. Requests that do not match any allow rule still remain accessible to the environment root key for bootstrap and recovery.
+The config API is YAML-only at the HTTP boundary. `GET /api/config.yaml` returns explanatory comments for humans and AI agents, and `PUT /api/config.yaml` ignores those comments naturally. This path behaves like a special system file mount: reading it requires `GetObject` on the current config path, and updating it requires `PutObject` on that same path. Requests that do not match any allow rule still remain accessible to the environment root key for bootstrap and recovery.
 
 The config endpoint is not special outside the mount model. It is a `system_config` mount. A user can move it by editing `mounts`, but validation must require at least one enabled `system_config` mount so the service cannot easily lose its editable config file.
 
@@ -323,7 +323,7 @@ Current mount types:
 
 - `quark_cookie`: read/write Quark Drive through the captured web cookie.
 - `quark_open`: read/write Quark Drive through QuarkOpen OAuth credentials.
-- `system_config`: exposes the service config as one mounted file path. The default mount is `/api/config.yaml`.
+- `system_config`: exposes the service config as one mounted file path. The default mount is `/api/config.yaml`, but the file name does not need to stay `config.yaml`.
 - `url_tree`: read-only `GET`/`HEAD` access to URL-backed files. This is useful for raw URLs or fixed download prefixes that need a server-side proxy in mainland China.
 - `github_releases`: read-only latest GitHub Release asset tree. This is better than `url_tree` for release assets because it supports listing the files through S3/ListBucket.
 

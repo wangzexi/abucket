@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::chrono_millis;
+use crate::{chrono_millis, mounts::normalize_virtual_path};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ServiceConfig {
@@ -221,12 +221,22 @@ pub(crate) fn parse_config_yaml(bytes: &[u8]) -> Result<ServiceConfig> {
     Ok(serde_yaml::from_slice(bytes)?)
 }
 
-pub(crate) fn commented_yaml(config: &ServiceConfig) -> Result<String> {
+pub(crate) fn commented_yaml(
+    config: &ServiceConfig,
+    public_base_url: &str,
+    config_path: &str,
+) -> Result<String> {
     let yaml = serde_yaml::to_string(config)?;
-    Ok(format!("{}{}", CONFIG_YAML_COMMENTS, yaml))
+    Ok(format!(
+        "{}{}",
+        config_yaml_comments(public_base_url, config_path),
+        yaml
+    ))
 }
 
-const CONFIG_YAML_COMMENTS: &str = r#"# atree config
+fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
+    format!(
+        r#"# atree config
 # This is the live service config. Comments are ignored on PUT.
 # If ATREE_ROOT_KEY is set, that key is treated as principal `root`.
 #
@@ -254,9 +264,9 @@ const CONFIG_YAML_COMMENTS: &str = r#"# atree config
 #   github_releases.token: optional GitHub token for higher rate limits or private repos.
 #   github_releases.asset_allow: optional list of asset names or * globs.
 #   github_releases.show_source_code: optional boolean. Exposes GitHub's source zip/tarball links.
-#   use {} or null when unused.
+#   use {{}} or null when unused.
 # system_config note:
-#   mount_path must end with /config.yaml, for example /api/config.yaml.
+#   mount_path is one mounted file path, not a directory. Example: {config_path}
 #   if you move this path, auth.rules must target the new path; the old path will 404.
 #
 # auth.keys: named service keys. Do not store plaintext keys here.
@@ -275,15 +285,17 @@ const CONFIG_YAML_COMMENTS: &str = r#"# atree config
 # `atree` is an S3-style file API with one mounted system config file.
 #
 # Examples:
-#   curl -H 'Authorization: Bearer <root-key>' 'http://127.0.0.1:9000/api/config.yaml'
-#   curl -X PUT -H 'Authorization: Bearer <root-key>' --data @config.yaml 'http://127.0.0.1:9000/api/config.yaml'
-#   curl -I -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/quark/public/example.txt'
-#   curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/quark?list-type=2&delimiter=/&prefix=public/'
-#   curl -X PUT -H 'Authorization: Bearer <key>' -T ./example.txt 'http://127.0.0.1:9000/quark/public/example.txt'
-#   curl -H 'Accept: text/html' 'http://127.0.0.1:9000/quark/public/'
-#   curl -H 'Accept: application/xml' 'http://127.0.0.1:9000/quark/public/'
+#   curl -H 'Authorization: Bearer <root-key>' '{public_base_url}{config_path}'
+#   curl -X PUT -H 'Authorization: Bearer <root-key>' --data @config.yaml '{public_base_url}{config_path}'
+#   curl -I -H 'Authorization: Bearer <key>' '{public_base_url}/quark/public/example.txt'
+#   curl -H 'Authorization: Bearer <key>' '{public_base_url}/quark?list-type=2&delimiter=/&prefix=public/'
+#   curl -X PUT -H 'Authorization: Bearer <key>' -T ./example.txt '{public_base_url}/quark/public/example.txt'
+#   curl -H 'Accept: text/html' '{public_base_url}/quark/public/'
+#   curl -H 'Accept: application/xml' '{public_base_url}/quark/public/'
 
-"#;
+"#
+    )
+}
 
 pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
     validate_bucket(&config.s3.bucket)?;
@@ -387,8 +399,8 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
             }
             "system_config" => {
                 validate_abs_path(&mount.root_path, "root_path")?;
-                if !mount.mount_path.ends_with("/config.yaml") {
-                    bail!("system_config mount_path must be a config file path ending with /config.yaml");
+                if normalize_virtual_path(&mount.mount_path) == "/" {
+                    bail!("system_config mount_path must be a file path, not /");
                 }
             }
             _ => unreachable!(),

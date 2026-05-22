@@ -12,7 +12,7 @@
 - `DELETE /quark/<key>`：删除对象
 - `GET /quark/<key>` + `Range`：范围读取，供 restic 读取 pack 片段
 - S3 multipart upload 的最小流程：`POST ?uploads`、`PUT ?partNumber=&uploadId=`、`POST ?uploadId=`、`DELETE ?uploadId=`
-- `GET /api/config.yaml` / `PUT /api/config.yaml`：像修改一个系统文件一样管理 mount、key、权限和 cache，系统文件通过 `system_config` 直接挂载到配置文件路径。
+- `GET /api/config.yaml` / `PUT /api/config.yaml`：像修改一个系统文件一样管理 mount、key、权限和 cache，系统文件通过 `system_config` 直接挂载到某个文件路径。
 - `GET` / `HEAD` 外部 HTTP 文件挂载：把 GitHub release/raw 等 URL 挂到服务文件树中，可按挂载单独配置代理
 
 这不是完整 S3 实现，暂时没有校验 AWS Signature。服务自己的访问控制由 `Authorization: Bearer <key>`、或 AWS SigV4 `Credential` 里的 access key 映射到本地 key 后完成。
@@ -99,7 +99,7 @@ tokens:
   refresh_token: '<private>'
 ```
 
-配置文件本身也是挂载树的一部分。`system_config` 直接挂到某个配置文件路径上，默认是 `/api/config.yaml`，也可以改到其它路径。例如：
+配置文件本身也是挂载树的一部分。`system_config` 直接挂到某个单文件路径上，默认是 `/api/config.yaml`，也可以改到其它路径。例如：
 
 ```yaml
 mounts:
@@ -107,7 +107,7 @@ mounts:
     type: quark_cookie
     root_path: /
     enabled: true
-  - mount_path: /system/config.yaml
+  - mount_path: /system/live.yaml
     type: system_config
     root_path: /
     enabled: true

@@ -1568,6 +1568,7 @@ async fn config_handler(
     body: Bytes,
     virtual_path: &str,
 ) -> Response {
+    let public_base_url = request_public_base_url(headers);
     match method {
         Method::GET => {
             if !is_authorized(state, headers, "GetObject", virtual_path).await {
@@ -1575,7 +1576,7 @@ async fn config_handler(
                 return access_denied(headers, &bucket);
             }
             let config = state.config.read().await.clone();
-            match commented_yaml(&config) {
+            match commented_yaml(&config, &public_base_url, virtual_path) {
                 Ok(yaml) => yaml_response(StatusCode::OK, yaml),
                 Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
             }
@@ -1597,7 +1598,8 @@ async fn config_handler(
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
             }
             *state.config.write().await = config.clone();
-            match commented_yaml(&config) {
+            let config_path = state_config_path(state).await;
+            match commented_yaml(&config, &public_base_url, &config_path) {
                 Ok(yaml) => yaml_response(StatusCode::OK, yaml),
                 Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
             }
@@ -1616,11 +1618,24 @@ async fn system_file_handler(
     body: Bytes,
     virtual_path: &str,
 ) -> Response {
-    if virtual_path.ends_with("/config.yaml") {
-        config_handler(state, method, headers, body, virtual_path).await
-    } else {
-        s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "unknown system file")
-    }
+    config_handler(state, method, headers, body, virtual_path).await
+}
+
+fn request_public_base_url(headers: &HeaderMap) -> String {
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(',').next().unwrap_or(value).trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("http");
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(',').next().unwrap_or(value).trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("127.0.0.1:9000");
+    format!("{scheme}://{host}")
 }
 
 async fn bucket_handler(
@@ -3471,7 +3486,7 @@ mod tests {
         assert!(validate_config(&config).is_err());
 
         let mut config = ServiceConfig::default();
-        config.mounts[1].mount_path = "/api".to_string();
+        config.mounts[1].mount_path = "/".to_string();
         assert!(validate_config(&config).is_err());
     }
 
@@ -3866,7 +3881,7 @@ cache:
     }
 
     #[tokio::test]
-    async fn config_yaml_mount_path_can_move() {
+    async fn system_config_mount_path_can_be_any_file_path() {
         let app = build_app(test_state(), 1024 * 1024);
         let moved_config = r#"
 mounts:
@@ -3874,7 +3889,7 @@ mounts:
     type: quark_cookie
     root_path: /
     enabled: true
-  - mount_path: /system/config.yaml
+  - mount_path: /system/live.yaml
     type: system_config
     root_path: /
     enabled: true
@@ -3886,7 +3901,7 @@ auth:
   rules:
     - principal: key:config-reader
       actions: [GetObject]
-      resources: [/system/config.yaml]
+      resources: [/system/live.yaml]
 cache:
   enabled: true
   max_bytes: 1048576
@@ -3909,7 +3924,7 @@ cache:
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/system/config.yaml")
+                    .uri("/system/live.yaml")
                     .header(header::AUTHORIZATION, "Bearer config-reader-key")
                     .body(Body::empty())
                     .unwrap(),
@@ -3917,11 +3932,7 @@ cache:
             .await
             .unwrap();
         assert_eq!(moved_get.status(), StatusCode::OK);
-        assert!(
-            response_text(moved_get)
-                .await
-                .contains("/system/config.yaml")
-        );
+        assert!(response_text(moved_get).await.contains("/system/live.yaml"));
 
         let old_get = app
             .oneshot(
@@ -4079,6 +4090,8 @@ cache:
                 Request::builder()
                     .uri("/api/config.yaml")
                     .header(header::AUTHORIZATION, "Bearer root-test-key")
+                    .header(header::HOST, "atree.example.test")
+                    .header("x-forwarded-proto", "https")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4088,6 +4101,7 @@ cache:
         let body = response_text(response).await;
         assert!(body.contains("# `atree` is an S3-style file API"));
         assert!(body.contains("curl -H 'Authorization: Bearer <root-key>'"));
+        assert!(body.contains("https://atree.example.test/api/config.yaml"));
         assert!(body.contains("curl -I -H 'Authorization: Bearer <key>'"));
         assert!(body.contains("-T ./example.txt"));
         assert!(body.contains("Accept: text/html"));

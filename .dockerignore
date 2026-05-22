@@ -1,0 +1,6 @@
+target
+.git
+.github
+tmp
+*.sqlite
+quark-open-oauth.yaml

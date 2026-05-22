@@ -53,12 +53,10 @@ curl -X PUT \
 
 `/api/config.yaml` 也走同一套权限模型：读取需要 `GetObject`，修改需要 `PutObject`，资源路径就是 `/api/config.yaml`。未命中任何 `auth.rules` 的请求，只有 `ATREE_ROOT_KEY` 对应的 `root` 身份还能访问，用作第一次写入配置或救援。
 
-夸克网页登录态放在对应 mount 的 `options.cookie` 里。`s3.bucket` 是 S3 path-style 客户端看到的 bucket 名：
+夸克网页登录态放在对应 mount 的 `options.cookie` 里。`s3_bucket` 是 S3 path-style 客户端看到的 bucket 名：
 
 ```yaml
-s3:
-  bucket: quark
-  max_upload_bytes: 134217728
+s3_bucket: atree
 mounts:
   - mount_path: /
     type: quark_cookie
@@ -160,11 +158,11 @@ auth:
 不做 AWS Signature 校验；服务自己的权限用 `Authorization: Bearer <key>` 控制。配置里允许匿名时可以用 AWS CLI 的匿名模式：
 
 ```bash
-aws --endpoint-url http://127.0.0.1:9000 s3 ls s3://quark --no-sign-request
+aws --endpoint-url http://127.0.0.1:9000 s3 ls s3://atree --no-sign-request
 echo hello > /tmp/atree.txt
-aws --endpoint-url http://127.0.0.1:9000 s3 cp /tmp/atree.txt s3://quark/examples/atree.txt --no-sign-request
-aws --endpoint-url http://127.0.0.1:9000 s3 cp s3://quark/examples/atree.txt - --no-sign-request
-aws --endpoint-url http://127.0.0.1:9000 s3 rm s3://quark/examples/atree.txt --no-sign-request
+aws --endpoint-url http://127.0.0.1:9000 s3 cp /tmp/atree.txt s3://atree/examples/atree.txt --no-sign-request
+aws --endpoint-url http://127.0.0.1:9000 s3 cp s3://atree/examples/atree.txt - --no-sign-request
+aws --endpoint-url http://127.0.0.1:9000 s3 rm s3://atree/examples/atree.txt --no-sign-request
 ```
 
 ## restic 使用
@@ -181,11 +179,11 @@ export RESTIC_PASSWORD='你的 restic 仓库密码'
 export AWS_ACCESS_KEY_ID='你的 atree key'
 export AWS_SECRET_ACCESS_KEY=dummy
 
-restic -r 's3:http://127.0.0.1:9000/quark/restic-repo' \
+restic -r 's3:http://127.0.0.1:9000/atree/restic-repo' \
   -o s3.bucket-lookup=path \
   init
 
-restic -r 's3:http://127.0.0.1:9000/quark/restic-repo' \
+restic -r 's3:http://127.0.0.1:9000/atree/restic-repo' \
   -o s3.bucket-lookup=path \
   backup ~/Documents
 ```
@@ -193,7 +191,7 @@ restic -r 's3:http://127.0.0.1:9000/quark/restic-repo' \
 如果要放到夸克的某个目录里，可以直接把目录写进 repo path，例如：
 
 ```bash
-restic -r 's3:http://127.0.0.1:9000/quark/我的备份/restic-repo' \
+restic -r 's3:http://127.0.0.1:9000/atree/我的备份/restic-repo' \
   -o s3.bucket-lookup=path \
   snapshots
 ```
@@ -203,9 +201,9 @@ restic -r 's3:http://127.0.0.1:9000/quark/我的备份/restic-repo' \
 也可以用 `curl`：
 
 ```bash
-curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/quark?list-type=2&delimiter=/'
-curl -H 'Authorization: Bearer <key>' -T /tmp/atree.txt 'http://127.0.0.1:9000/quark/examples/atree.txt'
-curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/quark/examples/atree.txt'
+curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/atree?list-type=2&delimiter=/'
+curl -H 'Authorization: Bearer <key>' -T /tmp/atree.txt 'http://127.0.0.1:9000/atree/examples/atree.txt'
+curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/atree/examples/atree.txt'
 ```
 
 MinIO JS SDK 的 path-style 用法也应该可用：
@@ -237,7 +235,7 @@ await client.fPutObject("quark", "examples/file.txt", "/tmp/file.txt");
 - `BIND`：监听地址，默认 `127.0.0.1:9000`。
 ## 已知限制
 
-- 上传会把单个对象读进内存后再走夸克上传流程。restic 默认 pack 约 16 MiB，当前够用；如调大 `--pack-size`，注意 `s3.max_upload_bytes` 和内存。`s3.max_upload_bytes` 会在启动时装配请求体上限，修改配置后需要重启才生效。
+- 上传会把单个对象读进内存后再走夸克上传流程。restic 默认 pack 约 16 MiB，当前够用；如调大 `--pack-size`，主要留意服务内存占用。
 - S3 XML 返回只覆盖常见字段，兼容性主要面向 restic、MinIO JS SDK、`aws s3`/`curl` 的基础操作。
 - Multipart upload 会先把分片落到系统 tmp 里的 `atree/multipart/` 临时目录，Complete 时再合并上传到夸克。可以用 `ATREE_MULTIPART_DIR` 改位置。
 - 下载会代理夸克下载链接，而不是返回 302。

@@ -15,22 +15,14 @@ use crate::{chrono_millis, mounts::normalize_virtual_path};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ServiceConfig {
-    #[serde(default)]
-    pub(crate) s3: S3Config,
+    #[serde(default = "default_bucket")]
+    pub(crate) s3_bucket: String,
     #[serde(default = "default_mounts")]
     pub(crate) mounts: Vec<MountConfig>,
     #[serde(default)]
     pub(crate) auth: AuthConfig,
     #[serde(default)]
     pub(crate) cache: CacheConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct S3Config {
-    #[serde(default = "default_bucket")]
-    pub(crate) bucket: String,
-    #[serde(default = "default_max_upload_bytes")]
-    pub(crate) max_upload_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +69,8 @@ pub(crate) struct AuthRule {
 pub(crate) struct CacheConfig {
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
+    #[serde(default = "default_cache_ttl_seconds")]
+    pub(crate) ttl_seconds: u64,
     #[serde(default = "default_cache_max_bytes")]
     pub(crate) max_bytes: u64,
 }
@@ -84,19 +78,10 @@ pub(crate) struct CacheConfig {
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
-            s3: S3Config::default(),
+            s3_bucket: default_bucket(),
             mounts: default_mounts(),
             auth: AuthConfig::default(),
             cache: CacheConfig::default(),
-        }
-    }
-}
-
-impl Default for S3Config {
-    fn default() -> Self {
-        Self {
-            bucket: default_bucket(),
-            max_upload_bytes: default_max_upload_bytes(),
         }
     }
 }
@@ -105,6 +90,7 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            ttl_seconds: default_cache_ttl_seconds(),
             max_bytes: default_cache_max_bytes(),
         }
     }
@@ -146,12 +132,12 @@ fn default_cache_max_bytes() -> u64 {
     50 * 1024 * 1024 * 1024
 }
 
-fn default_max_upload_bytes() -> usize {
-    128 * 1024 * 1024
+fn default_cache_ttl_seconds() -> u64 {
+    600
 }
 
 fn default_bucket() -> String {
-    "quark".to_string()
+    "atree".to_string()
 }
 
 pub(crate) fn config_db_path() -> Result<PathBuf> {
@@ -166,7 +152,10 @@ pub(crate) fn config_db_path() -> Result<PathBuf> {
         .join("atree.sqlite"))
 }
 
-pub(crate) fn load_or_init_config(db_path: &Path) -> Result<ServiceConfig> {
+pub(crate) fn load_or_init_config(
+    db_path: &Path,
+    bootstrap_config_path: Option<&Path>,
+) -> Result<ServiceConfig> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -187,7 +176,13 @@ pub(crate) fn load_or_init_config(db_path: &Path) -> Result<ServiceConfig> {
         validate_config(&config)?;
         return Ok(config);
     }
-    let config = ServiceConfig::default();
+    let config = if let Some(path) = bootstrap_config_path {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read bootstrap config: {}", path.display()))?;
+        normalize_config(parse_config_yaml(&bytes)?)?
+    } else {
+        ServiceConfig::default()
+    };
     save_config_to_db(db_path, &config)?;
     Ok(config)
 }
@@ -240,9 +235,7 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # This is the live service config. Comments are ignored on PUT.
 # If ATREE_ROOT_KEY is set, that key is treated as principal `root`.
 #
-# s3.bucket: path-style S3 bucket name used by clients. Default: quark.
-# s3.max_upload_bytes: max request body size for PUT/multipart parts. Changes need restart.
-#
+# s3_bucket: path-style S3 bucket name used by clients. Default: atree.
 # mounts: ordered mount table. Later mounts have higher priority.
 # mounts[].mount_path: service path, must start with /. Example: /quark or /pub
 # mounts[].type: quark_cookie, quark_open, system_config, url_tree, or github_releases.
@@ -279,7 +272,8 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # auth.rules[].resources: service paths such as /public/* or /*.
 # requests that match no rule are denied unless the caller is `root`.
 #
-# cache.enabled: reserved for read-through cache work.
+# cache.enabled: enable local read cache for Quark-backed GET/HEAD object reads.
+# cache.ttl_seconds: cached object freshness window. Default: 600.
 # cache.max_bytes: max local cache size in bytes; it is not Quark capacity.
 #
 # `atree` is an S3-style file API with one mounted system config file.
@@ -287,23 +281,23 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # Examples:
 #   curl -H 'Authorization: Bearer <root-key>' '{public_base_url}{config_path}'
 #   curl -X PUT -H 'Authorization: Bearer <root-key>' --data @config.yaml '{public_base_url}{config_path}'
-#   curl -I -H 'Authorization: Bearer <key>' '{public_base_url}/quark/public/example.txt'
-#   curl -H 'Authorization: Bearer <key>' '{public_base_url}/quark?list-type=2&delimiter=/&prefix=public/'
-#   curl -X PUT -H 'Authorization: Bearer <key>' -T ./example.txt '{public_base_url}/quark/public/example.txt'
-#   curl -H 'Accept: text/html' '{public_base_url}/quark/public/'
-#   curl -H 'Accept: application/xml' '{public_base_url}/quark/public/'
+#   curl -I -H 'Authorization: Bearer <key>' '{public_base_url}/atree/public/example.txt'
+#   curl -H 'Authorization: Bearer <key>' '{public_base_url}/atree?list-type=2&delimiter=/&prefix=public/'
+#   curl -X PUT -H 'Authorization: Bearer <key>' -T ./example.txt '{public_base_url}/atree/public/example.txt'
+#   curl -H 'Accept: text/html' '{public_base_url}/atree/public/'
+#   curl -H 'Accept: application/xml' '{public_base_url}/atree/public/'
 
 "#
     )
 }
 
 pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
-    validate_bucket(&config.s3.bucket)?;
-    if config.s3.max_upload_bytes == 0 {
-        bail!("s3.max_upload_bytes must be greater than 0");
-    }
+    validate_bucket(&config.s3_bucket)?;
     if config.mounts.is_empty() {
         bail!("config.mounts must contain at least one mount");
+    }
+    if config.cache.ttl_seconds == 0 {
+        bail!("cache.ttl_seconds must be greater than 0");
     }
     let mut mount_paths = HashSet::new();
     let mut has_system_config = false;
@@ -465,10 +459,10 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
 
 fn validate_bucket(bucket: &str) -> Result<()> {
     if bucket.trim().is_empty() {
-        bail!("s3.bucket cannot be empty");
+        bail!("s3_bucket cannot be empty");
     }
     if bucket.contains('/') {
-        bail!("s3.bucket cannot contain /");
+        bail!("s3_bucket cannot contain /");
     }
     Ok(())
 }

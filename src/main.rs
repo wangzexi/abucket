@@ -22,7 +22,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path, RawQuery, State},
+    extract::{Path, RawQuery, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::any,
@@ -57,7 +57,23 @@ struct AppState {
     config: Arc<RwLock<ServiceConfig>>,
     db_path: PathBuf,
     root_key: Option<String>,
+    cache_dir: PathBuf,
     multipart_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CacheMeta {
+    size: u64,
+    modified: i64,
+    fetched_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedObject {
+    bytes: Bytes,
+    meta: CacheMeta,
 }
 
 #[derive(Clone)]
@@ -1355,12 +1371,14 @@ async fn main() -> Result<()> {
     let db_path = config_db_path()?;
     let multipart_dir = multipart_dir_path();
     std::fs::create_dir_all(&multipart_dir)?;
-    let config = load_or_init_config(&db_path)?;
+    let cache_dir = cache_dir_path();
+    std::fs::create_dir_all(&cache_dir)?;
+    let bootstrap_config_path = env::var_os("ATREE_BOOTSTRAP_CONFIG").map(PathBuf::from);
+    let config = load_or_init_config(&db_path, bootstrap_config_path.as_deref())?;
     let root_key = env::var("ATREE_ROOT_KEY").ok();
     if root_key.is_none() {
         warn!("ATREE_ROOT_KEY is not set; only explicit auth rules will grant access");
     }
-    let max_upload_bytes = config.s3.max_upload_bytes;
     let bind: SocketAddr = env::var("BIND")
         .unwrap_or_else(|_| "127.0.0.1:9000".into())
         .parse()?;
@@ -1369,9 +1387,10 @@ async fn main() -> Result<()> {
         config: Arc::new(RwLock::new(config)),
         db_path,
         root_key,
+        cache_dir,
         multipart_dir,
     };
-    let app = build_app(state, max_upload_bytes);
+    let app = build_app(state);
     let listener = TcpListener::bind(bind).await?;
     info!("serving atree at http://{bind}");
     axum::serve(listener, app).await?;
@@ -1384,8 +1403,14 @@ fn multipart_dir_path() -> PathBuf {
         .unwrap_or_else(|_| env::temp_dir().join("atree").join("multipart"))
 }
 
+fn cache_dir_path() -> PathBuf {
+    env::var("ATREE_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| env::temp_dir().join("atree").join("cache"))
+}
+
 async fn state_bucket(state: &AppState) -> String {
-    state.config.read().await.s3.bucket.clone()
+    state.config.read().await.s3_bucket.clone()
 }
 
 async fn state_config_path(state: &AppState) -> String {
@@ -1401,13 +1426,12 @@ async fn state_config_path(state: &AppState) -> String {
         .unwrap_or_else(|| "/api/config.yaml".to_string())
 }
 
-fn build_app(state: AppState, max_upload_bytes: usize) -> Router {
+fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/", any(root_handler))
         .route("/{bucket}", any(bucket_handler))
         .route("/{bucket}/", any(bucket_handler))
         .route("/{bucket}/{*key}", any(object_handler))
-        .layer(DefaultBodyLimit::max(max_upload_bytes))
         .with_state(state)
 }
 
@@ -1573,7 +1597,7 @@ async fn config_handler(
         Method::GET => {
             if !is_authorized(state, headers, "GetObject", virtual_path).await {
                 let bucket = state_bucket(state).await;
-                return access_denied(headers, &bucket);
+                return access_denied_response(state, headers, &bucket).await;
             }
             let config = state.config.read().await.clone();
             match commented_yaml(&config, &public_base_url, virtual_path) {
@@ -1584,7 +1608,7 @@ async fn config_handler(
         Method::PUT => {
             if !is_authorized(state, headers, "PutObject", virtual_path).await {
                 let bucket = state_bucket(state).await;
-                return access_denied(headers, &bucket);
+                return access_denied_response(state, headers, &bucket).await;
             }
             let config: ServiceConfig = match parse_config_yaml(&body) {
                 Ok(config) => config,
@@ -1676,7 +1700,7 @@ async fn bucket_handler(
                     _ => "Unknown",
                 };
                 if !is_authorized(&state, &headers, action, &virtual_path).await {
-                    return access_denied(&headers, &current_bucket);
+                    return access_denied_response(&state, &headers, &current_bucket).await;
                 }
                 return url_object(method, &headers, url, proxy).await;
             }
@@ -1687,7 +1711,7 @@ async fn bucket_handler(
                     _ => "Unknown",
                 };
                 if !is_authorized(&state, &headers, action, &virtual_path).await {
-                    return access_denied(&headers, &current_bucket);
+                    return access_denied_response(&state, &headers, &current_bucket).await;
                 }
                 return github_releases_object(method, &headers, rest, config).await;
             }
@@ -1804,7 +1828,7 @@ async fn object_handler(
         _ => "Unknown",
     };
     if !is_authorized(&state, &headers, action, &virtual_path).await {
-        return access_denied(&headers, &current_bucket);
+        return access_denied_response(&state, &headers, &current_bucket).await;
     }
     let mount = match resolved_mount {
         Some(mount) => mount,
@@ -1861,8 +1885,8 @@ async fn object_handler(
         return abort_multipart_upload(&state, &params).await;
     }
     let result = match method {
-        Method::GET => get_object(&backend, &remote_key, &headers).await,
-        Method::HEAD => head_object(&backend, &remote_key).await,
+        Method::GET => get_object_cached(&state, &backend, &virtual_path, &remote_key, &headers).await,
+        Method::HEAD => head_object_cached(&state, &backend, &virtual_path, &remote_key).await,
         Method::PUT => {
             let body = match decode_request_body(&headers, body) {
                 Ok(body) => body,
@@ -1882,9 +1906,16 @@ async fn object_handler(
             backend
                 .put_object(&remote_key, &content_type, body)
                 .await
-                .map(|_| (StatusCode::OK, [(header::ETAG, etag)]).into_response())
+                .map(|_| {
+                    let state = state.clone();
+                    let virtual_path = virtual_path.to_string();
+                    tokio::spawn(async move {
+                        invalidate_cached_object(&state, &virtual_path).await;
+                    });
+                    (StatusCode::OK, [(header::ETAG, etag)]).into_response()
+                })
         }
-        Method::DELETE => delete_object(&backend, &remote_key).await,
+        Method::DELETE => delete_object_cached(&state, &backend, &virtual_path, &remote_key).await,
         _ => Ok(s3_error(
             StatusCode::METHOD_NOT_ALLOWED,
             "MethodNotAllowed",
@@ -1934,7 +1965,7 @@ async fn list_objects(
     };
 
     if !is_authorized(&state, headers, "ListBucket", &virtual_prefix).await {
-        return access_denied(headers, &bucket);
+        return access_denied_response(&state, headers, &bucket).await;
     }
 
     let config = state.config.read().await;
@@ -2085,58 +2116,6 @@ async fn list_files_for_s3(
     Ok(out)
 }
 
-async fn get_object(backend: &QuarkBackend, key: &str, headers: &HeaderMap) -> Result<Response> {
-    let total_start = SystemTime::now();
-    let file = backend
-        .find_object(key)
-        .await?
-        .filter(|f| f.file)
-        .ok_or_else(|| anyhow!("object not found"))?;
-    let (url, cookie) = backend.download_url_and_cookie(&file.fid).await?;
-    let range = parse_range_header(headers, file.size)?;
-    let mut req = backend
-        .http()
-        .get(url)
-        .header(header::COOKIE, cookie)
-        .header(header::REFERER, REFERER);
-    if let Some((start, end)) = range {
-        req = req.header(header::RANGE, format!("bytes={start}-{end}"));
-    }
-    let res = req.send().await?;
-    timing_log("download.headers", key, file.size, total_start);
-    let status = res.status();
-    if !(status.is_success() || status == StatusCode::PARTIAL_CONTENT) {
-        bail!("download failed {status}");
-    }
-    let stream = res.bytes_stream().map_err(std::io::Error::other);
-    let mut resp = Response::new(Body::from_stream(stream));
-    if let Some((start, end)) = range {
-        *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
-        resp.headers_mut().insert(
-            header::CONTENT_RANGE,
-            HeaderValue::from_str(&format!("bytes {start}-{end}/{}", file.size))?,
-        );
-        resp.headers_mut().insert(
-            header::CONTENT_LENGTH,
-            HeaderValue::from_str(&(end - start + 1).to_string())?,
-        );
-    } else {
-        *resp.status_mut() = StatusCode::OK;
-        resp.headers_mut().insert(
-            header::CONTENT_LENGTH,
-            HeaderValue::from_str(&file.size.to_string())?,
-        );
-    }
-    resp.headers_mut().insert(
-        header::LAST_MODIFIED,
-        HeaderValue::from_str(&http_time(file.updated_at.max(file.created_at)))?,
-    );
-    resp.headers_mut()
-        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    timing_log("download.response", key, file.size, total_start);
-    Ok(resp)
-}
-
 async fn head_object(backend: &QuarkBackend, key: &str) -> Result<Response> {
     let file = backend
         .find_object(key)
@@ -2155,6 +2134,214 @@ async fn head_object(backend: &QuarkBackend, key: &str) -> Result<Response> {
     resp.headers_mut()
         .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     Ok(resp)
+}
+
+async fn get_object_bytes(backend: &QuarkBackend, key: &str) -> Result<CachedObject> {
+    let file = backend
+        .find_object(key)
+        .await?
+        .filter(|f| f.file)
+        .ok_or_else(|| anyhow!("object not found"))?;
+    let (url, cookie) = backend.download_url_and_cookie(&file.fid).await?;
+    let res = backend
+        .http()
+        .get(url)
+        .header(header::COOKIE, cookie)
+        .header(header::REFERER, REFERER)
+        .send()
+        .await?;
+    let status = res.status();
+    if !status.is_success() {
+        bail!("download failed {status}");
+    }
+    let content_type = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
+    let bytes = res.bytes().await?;
+    Ok(CachedObject {
+        meta: CacheMeta {
+            size: bytes.len() as u64,
+            modified: file.updated_at.max(file.created_at),
+            fetched_at: chrono_millis(),
+            content_type,
+        },
+        bytes,
+    })
+}
+
+async fn get_object_cached(
+    state: &AppState,
+    backend: &QuarkBackend,
+    virtual_path: &str,
+    key: &str,
+    headers: &HeaderMap,
+) -> Result<Response> {
+    if let Some(cached) = read_cached_object(state, virtual_path).await {
+        return cached_object_response(cached, headers, false);
+    }
+    let cached = get_object_bytes(backend, key).await?;
+    write_cached_object(state, virtual_path, &cached).await;
+    cached_object_response(cached, headers, false)
+}
+
+async fn head_object_cached(
+    state: &AppState,
+    backend: &QuarkBackend,
+    virtual_path: &str,
+    key: &str,
+) -> Result<Response> {
+    if let Some(cached) = read_cached_object(state, virtual_path).await {
+        return cached_object_response(cached, &HeaderMap::new(), true);
+    }
+    head_object(backend, key).await
+}
+
+fn cached_object_response(
+    cached: CachedObject,
+    headers: &HeaderMap,
+    head_only: bool,
+) -> Result<Response> {
+    let total_size = cached.meta.size as i64;
+    let range = if head_only {
+        None
+    } else {
+        parse_range_header(headers, total_size)?
+    };
+    let mut resp = if head_only {
+        Response::new(Body::empty())
+    } else if let Some((start, end)) = range {
+        Response::new(Body::from(cached.bytes.slice(start as usize..(end + 1) as usize)))
+    } else {
+        Response::new(Body::from(cached.bytes.clone()))
+    };
+    *resp.status_mut() = if range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    if let Some((start, end)) = range {
+        resp.headers_mut().insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {start}-{end}/{total_size}"))?,
+        );
+        resp.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&(end - start + 1).to_string())?,
+        );
+    } else {
+        resp.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&cached.meta.size.to_string())?,
+        );
+    }
+    resp.headers_mut().insert(
+        header::LAST_MODIFIED,
+        HeaderValue::from_str(&http_time(cached.meta.modified))?,
+    );
+    resp.headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Some(content_type) = cached.meta.content_type
+        && let Ok(value) = HeaderValue::from_str(&content_type)
+    {
+        resp.headers_mut().insert(header::CONTENT_TYPE, value);
+    }
+    Ok(resp)
+}
+
+async fn read_cached_object(state: &AppState, virtual_path: &str) -> Option<CachedObject> {
+    let cache = state.config.read().await.cache.clone();
+    if !cache.enabled {
+        return None;
+    }
+    let (body_path, meta_path) = cache_paths(&state.cache_dir, virtual_path);
+    let meta_bytes = tokio::fs::read(&meta_path).await.ok()?;
+    let meta: CacheMeta = serde_json::from_slice(&meta_bytes).ok()?;
+    if !cache_is_fresh(&meta, cache.ttl_seconds) {
+        let _ = tokio::fs::remove_file(&body_path).await;
+        let _ = tokio::fs::remove_file(&meta_path).await;
+        return None;
+    }
+    let bytes = tokio::fs::read(&body_path).await.ok()?;
+    Some(CachedObject {
+        bytes: Bytes::from(bytes),
+        meta,
+    })
+}
+
+async fn write_cached_object(state: &AppState, virtual_path: &str, cached: &CachedObject) {
+    let cache = state.config.read().await.cache.clone();
+    if !cache.enabled || cached.meta.size > cache.max_bytes {
+        return;
+    }
+    let (body_path, meta_path) = cache_paths(&state.cache_dir, virtual_path);
+    let _ = tokio::fs::create_dir_all(&state.cache_dir).await;
+    let meta = match serde_json::to_vec(&cached.meta) {
+        Ok(meta) => meta,
+        Err(_) => return,
+    };
+    if tokio::fs::write(&body_path, &cached.bytes).await.is_ok() {
+        let _ = tokio::fs::write(&meta_path, meta).await;
+        cleanup_cache_dir(state, &cache).await;
+    }
+}
+
+async fn invalidate_cached_object(state: &AppState, virtual_path: &str) {
+    let (body_path, meta_path) = cache_paths(&state.cache_dir, virtual_path);
+    let _ = tokio::fs::remove_file(&body_path).await;
+    let _ = tokio::fs::remove_file(&meta_path).await;
+}
+
+fn cache_paths(cache_dir: &PathBuf, virtual_path: &str) -> (PathBuf, PathBuf) {
+    let key = hex::encode(Sha256::digest(virtual_path.as_bytes()));
+    (
+        cache_dir.join(format!("{key}.bin")),
+        cache_dir.join(format!("{key}.json")),
+    )
+}
+
+fn cache_is_fresh(meta: &CacheMeta, ttl_seconds: u64) -> bool {
+    chrono_millis() - meta.fetched_at <= (ttl_seconds as i64) * 1000
+}
+
+async fn cleanup_cache_dir(state: &AppState, cache: &config::CacheConfig) {
+    let mut entries = Vec::new();
+    let Ok(read_dir) = std::fs::read_dir(&state.cache_dir) else {
+        return;
+    };
+    for entry in read_dir.filter_map(|entry| entry.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(meta_bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_slice::<CacheMeta>(&meta_bytes) else {
+            continue;
+        };
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let body_path = state.cache_dir.join(format!("{stem}.bin"));
+        if !body_path.exists() || !cache_is_fresh(&meta, cache.ttl_seconds) {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(&body_path);
+            continue;
+        }
+        entries.push((meta.fetched_at, meta.size, body_path, path));
+    }
+    let mut total_bytes: u64 = entries.iter().map(|(_, size, _, _)| *size).sum();
+    entries.sort_by_key(|(fetched_at, _, _, _)| *fetched_at);
+    for (_, size, body_path, meta_path) in entries {
+        if total_bytes <= cache.max_bytes {
+            break;
+        }
+        let _ = std::fs::remove_file(&body_path);
+        let _ = std::fs::remove_file(&meta_path);
+        total_bytes = total_bytes.saturating_sub(size);
+    }
 }
 
 async fn url_object(
@@ -2455,6 +2642,17 @@ async fn delete_object(backend: &QuarkBackend, key: &str) -> Result<Response> {
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+async fn delete_object_cached(
+    state: &AppState,
+    backend: &QuarkBackend,
+    virtual_path: &str,
+    key: &str,
+) -> Result<Response> {
+    let response = delete_object(backend, key).await?;
+    invalidate_cached_object(state, virtual_path).await;
+    Ok(response)
+}
+
 async fn initiate_multipart_upload(state: &AppState, key: &str, remote_key: &str) -> Response {
     let bucket = state_bucket(state).await;
     let upload_id = new_upload_id(remote_key);
@@ -2672,7 +2870,7 @@ async fn browser_directory(
     else {
         return html("null");
     };
-    match get_object(&backend, &remote_key, headers).await {
+    match get_object_cached(state, &backend, &index_path, &remote_key, headers).await {
         Ok(resp) => resp,
         Err(_) => html("null"),
     }
@@ -2949,15 +3147,20 @@ fn yaml_response(status: StatusCode, yaml: String) -> Response {
         .into_response()
 }
 
-fn access_denied(headers: &HeaderMap, bucket: &str) -> Response {
+fn access_denied(headers: &HeaderMap, bucket: &str, config_path: &str) -> Response {
     if wants_html(headers) {
         html_response(
             StatusCode::UNAUTHORIZED,
-            file_browser_html(bucket, "/api/config.yaml", "null", r#""需要访问 key。""#),
+            file_browser_html(bucket, config_path, "null", r#""需要访问 key。""#),
         )
     } else {
         s3_error(StatusCode::FORBIDDEN, "AccessDenied", "access denied")
     }
+}
+
+async fn access_denied_response(state: &AppState, headers: &HeaderMap, bucket: &str) -> Response {
+    let config_path = state_config_path(state).await;
+    access_denied(headers, bucket, &config_path)
 }
 
 fn s3_error(status: StatusCode, code: &str, message: &str) -> Response {
@@ -3204,7 +3407,7 @@ mod tests {
 
     fn config_with_mounts(mounts: Vec<MountConfig>) -> ServiceConfig {
         ServiceConfig {
-            s3: Default::default(),
+            s3_bucket: "atree".to_string(),
             mounts,
             auth: AuthConfig::default(),
             cache: CacheConfig::default(),
@@ -3229,16 +3432,24 @@ mod tests {
             chrono_millis(),
             id
         ));
-        let config = load_or_init_config(&db_path).unwrap();
+        let config = load_or_init_config(&db_path, None).unwrap();
         let multipart_dir = std::env::temp_dir().join(format!(
             "atree-test-multipart-{}-{}-{}",
             std::process::id(),
             chrono_millis(),
             id
         ));
+        let cache_dir = std::env::temp_dir().join(format!(
+            "atree-test-cache-{}-{}-{}",
+            std::process::id(),
+            chrono_millis(),
+            id
+        ));
         std::fs::create_dir_all(&multipart_dir).unwrap();
+        std::fs::create_dir_all(&cache_dir).unwrap();
         AppState {
             config: Arc::new(RwLock::new(config)),
+            cache_dir,
             multipart_dir,
             db_path,
             root_key: Some("root-test-key".to_string()),
@@ -3253,6 +3464,70 @@ mod tests {
                 .to_vec(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cache_roundtrip_and_invalidation_work() {
+        let state = test_state();
+        let cached = CachedObject {
+            bytes: Bytes::from_static(b"hello cache"),
+            meta: CacheMeta {
+                size: 11,
+                modified: chrono_millis(),
+                fetched_at: chrono_millis(),
+                content_type: Some("text/plain".to_string()),
+            },
+        };
+        write_cached_object(&state, "/atree/demo.txt", &cached).await;
+        let loaded = read_cached_object(&state, "/atree/demo.txt").await;
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().bytes, Bytes::from_static(b"hello cache"));
+
+        invalidate_cached_object(&state, "/atree/demo.txt").await;
+        assert!(read_cached_object(&state, "/atree/demo.txt").await.is_none());
+    }
+
+    #[test]
+    fn bootstrap_config_can_seed_empty_db() {
+        let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "atree-bootstrap-{}-{}-{}",
+            std::process::id(),
+            chrono_millis(),
+            id
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("atree.sqlite");
+        let bootstrap_path = root.join("config.yaml");
+        std::fs::write(
+            &bootstrap_path,
+            r#"
+s3_bucket: atree
+mounts:
+  - mount_path: /
+    type: quark_open
+    root_path: /
+    enabled: true
+    options:
+      oauth_file: /data/quark-open-oauth.yaml
+  - mount_path: /api/config.yaml
+    type: system_config
+    root_path: /
+    enabled: true
+auth:
+  keys: []
+  rules: []
+cache:
+  enabled: true
+  ttl_seconds: 600
+  max_bytes: 1048576
+"#,
+        )
+        .unwrap();
+        let config = load_or_init_config(&db_path, Some(&bootstrap_path)).unwrap();
+        assert_eq!(config.s3_bucket, "atree");
+        assert_eq!(config.cache.ttl_seconds, 600);
+        assert_eq!(config.mounts[0].mount_type, "quark_open");
     }
 
     #[test]
@@ -3432,7 +3707,7 @@ mod tests {
     #[test]
     fn plain_key_is_hashed_and_not_serialized() {
         let config = ServiceConfig {
-            s3: Default::default(),
+            s3_bucket: "atree".to_string(),
             mounts: default_mounts(),
             auth: AuthConfig {
                 keys: vec![KeyConfig {
@@ -3492,7 +3767,7 @@ mod tests {
 
     #[tokio::test]
     async fn root_route_negotiates_browser_html_and_s3_xml() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
 
         let html_resp = app
             .clone()
@@ -3525,12 +3800,12 @@ mod tests {
         assert_eq!(xml_resp.status(), StatusCode::OK);
         let xml = response_text(xml_resp).await;
         assert!(xml.contains("<ListAllMyBucketsResult"));
-        assert!(xml.contains("<Name>quark</Name>"));
+        assert!(xml.contains("<Name>atree</Name>"));
     }
 
     #[tokio::test]
     async fn root_browser_list_requires_auth_and_root_can_read_it() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
 
         let no_auth = app
             .clone()
@@ -3558,13 +3833,13 @@ mod tests {
             .unwrap();
         assert_eq!(root.status(), StatusCode::OK);
         let body = response_text(root).await;
-        assert!(body.contains("\"name\":\"quark\""));
+        assert!(body.contains("\"name\":\"atree\""));
         assert!(body.contains("\"name\":\"api\""));
     }
 
     #[tokio::test]
     async fn synthetic_directory_browser_shell_defers_auth_to_client_fetch() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
 
         let response = app
             .oneshot(
@@ -3585,7 +3860,7 @@ mod tests {
 
     #[tokio::test]
     async fn synthetic_directory_browser_list_requires_auth_and_root_can_read_it() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
 
         let no_auth = app
             .clone()
@@ -3618,7 +3893,7 @@ mod tests {
 
     #[tokio::test]
     async fn root_browser_view_shows_top_level_entries() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
 
         let response = app
             .oneshot(
@@ -3639,7 +3914,7 @@ mod tests {
 
     #[tokio::test]
     async fn config_api_yaml_requires_root_hashes_plain_key_and_rejects_invalid_config() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
 
         let no_auth = app
             .clone()
@@ -3740,7 +4015,7 @@ cache:
 
     #[tokio::test]
     async fn config_api_supports_commented_yaml_roundtrip() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
         let yaml_config = r#"
 # This comment should be ignored on PUT.
 mounts:
@@ -3810,7 +4085,7 @@ cache:
 
     #[tokio::test]
     async fn config_yaml_can_be_delegated_with_normal_auth_rules() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
         let bootstrap_config = r#"
 mounts:
   - mount_path: /
@@ -3882,7 +4157,7 @@ cache:
 
     #[tokio::test]
     async fn system_config_mount_path_can_be_any_file_path() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
         let moved_config = r#"
 mounts:
   - mount_path: /
@@ -3967,7 +4242,7 @@ cache:
 
         let state = test_state();
         *state.config.write().await = ServiceConfig {
-            s3: Default::default(),
+            s3_bucket: "quark".to_string(),
             mounts: vec![
                 MountConfig {
                     mount_path: "/".to_string(),
@@ -4001,7 +4276,7 @@ cache:
             },
             cache: CacheConfig::default(),
         };
-        let app = build_app(state, 1024 * 1024);
+        let app = build_app(state);
 
         let response = app
             .oneshot(
@@ -4018,7 +4293,7 @@ cache:
 
     #[tokio::test]
     async fn old_json_config_route_is_not_exposed() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
         let response = app
             .oneshot(
                 Request::builder()
@@ -4034,7 +4309,7 @@ cache:
 
     #[tokio::test]
     async fn old_help_route_is_not_supported() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
         let response = app
             .clone()
             .oneshot(
@@ -4063,11 +4338,11 @@ cache:
 
     #[tokio::test]
     async fn s3_list_is_default_denied_before_backend_access() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/quark?list-type=2&delimiter=/")
+                    .uri("/atree?list-type=2&delimiter=/")
                     .header(header::ACCEPT, "application/xml")
                     .body(Body::empty())
                     .unwrap(),
@@ -4084,7 +4359,7 @@ cache:
 
     #[tokio::test]
     async fn config_yaml_comments_include_ai_friendly_examples() {
-        let app = build_app(test_state(), 1024 * 1024);
+        let app = build_app(test_state());
         let response = app
             .oneshot(
                 Request::builder()

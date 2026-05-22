@@ -2440,7 +2440,9 @@ async fn github_releases_object(
     };
     let mut response = url_object(method, headers, url, config.proxy.clone()).await;
     if response.status().is_success() {
-        if let Ok(value) = HeaderValue::from_str(&size.to_string()) {
+        let partial = response.status() == StatusCode::PARTIAL_CONTENT
+            || response.headers().contains_key(header::CONTENT_RANGE);
+        if !partial && let Ok(value) = HeaderValue::from_str(&size.to_string()) {
             response.headers_mut().insert(header::CONTENT_LENGTH, value);
         }
         if let Ok(value) = HeaderValue::from_str(&http_time(modified)) {

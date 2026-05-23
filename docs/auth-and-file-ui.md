@@ -300,8 +300,8 @@ Fields:
 
 - `mount_path`: where the mount appears in this service
 - `type`: how to access the remote system, such as `quark_cookie`, `quark_open`, `system_config`, `url_tree`, `github_releases`, or future `s3`
-- `root_path`: where this mount starts in the remote system
-- `enabled`: whether the mount is active
+- `root_path`: where this mount starts in the remote system. It is only present for mount types backed by a remote tree, not for `system_config`.
+- To disable a mount, comment it out of the YAML.
 - `options`: mount-specific settings, such as an outbound proxy for `url_tree` or `github_releases`
 
 `mount_path` is the mount's unique identifier. A separate `name` field is not needed in the first version.
@@ -334,7 +334,6 @@ mounts:
   - mount_path: /github/sing-box
     type: url_tree
     root_path: https://github.com/SagerNet/sing-box/releases/download/v1.12.0
-    enabled: true
     options:
       proxy: http://127.0.0.1:1080
 auth:
@@ -351,7 +350,6 @@ mounts:
   - mount_path: /hiddify
     type: github_releases
     root_path: hiddify/hiddify-app
-    enabled: true
     options:
       proxy: http://127.0.0.1:1080
       token: <github token>
@@ -373,7 +371,7 @@ The routing rule should be:
 
 ```text
 request path
-  -> find enabled mount by scanning mounts from back to front
+  -> find mount by scanning mounts from back to front
   -> the first path-segment match wins
   -> strip mount_path from request path
   -> join the remaining path with root_path
@@ -506,18 +504,14 @@ mounts:
   - mount_path: /quark
     type: quark_cookie
     root_path: /
-    enabled: true
     options:
       cookie: "<quark cookie>"
       root_fid: "0"
   - mount_path: /api/config.yaml
     type: system_config
-    root_path: /
-    enabled: true
   - mount_path: /github/sing-box
     type: url_tree
     root_path: https://github.com/SagerNet/sing-box/releases/download/v1.12.0
-    enabled: true
     options:
       proxy: http://127.0.0.1:1080
 auth:
@@ -525,11 +519,9 @@ auth:
     - name: admin
       key_hash: sha256:...
       key_hint: adm_...abcd
-      enabled: true
     - name: reader
       key_hash: sha256:...
       key_hint: rdr_...wxyz
-      enabled: true
   rules:
     - principal: anonymous
       actions: [HeadObject, GetObject]
@@ -541,7 +533,6 @@ auth:
       actions: [ListBucket, HeadObject, GetObject]
       resources: [/public/*, /share/*]
 cache:
-  enabled: true
   max_bytes: 53687091200
 ```
 

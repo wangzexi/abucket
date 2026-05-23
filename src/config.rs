@@ -30,9 +30,8 @@ pub(crate) struct MountConfig {
     pub(crate) mount_path: String,
     #[serde(rename = "type")]
     pub(crate) mount_type: String,
-    pub(crate) root_path: String,
-    #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) root_path: Option<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub(crate) options: Value,
 }
@@ -110,15 +109,13 @@ pub(crate) fn default_mounts() -> Vec<MountConfig> {
         MountConfig {
             mount_path: "/".to_string(),
             mount_type: "quark_cookie".to_string(),
-            root_path: "/".to_string(),
-            enabled: true,
+            root_path: Some("/".to_string()),
             options: Value::Null,
         },
         MountConfig {
             mount_path: "/api/config.yaml".to_string(),
             mount_type: "system_config".to_string(),
-            root_path: "/".to_string(),
-            enabled: true,
+            root_path: None,
             options: Value::Null,
         },
     ]
@@ -152,6 +149,10 @@ pub(crate) fn config_db_path() -> Result<PathBuf> {
         .join("atree.sqlite"))
 }
 
+pub(crate) fn mount_root_path(mount: &MountConfig) -> &str {
+    mount.root_path.as_deref().unwrap_or("")
+}
+
 pub(crate) fn load_or_init_config(
     db_path: &Path,
     bootstrap_config_path: Option<&Path>,
@@ -172,8 +173,8 @@ pub(crate) fn load_or_init_config(
         .query_row("SELECT json FROM config WHERE id = 1", [], |row| row.get(0))
         .ok();
     if let Some(raw) = existing {
-        let config: ServiceConfig = serde_json::from_str(&raw)?;
-        validate_config(&config)?;
+        let config = normalize_config(serde_json::from_str(&raw)?)?;
+        save_config_to_db(db_path, &config)?;
         return Ok(config);
     }
     let config = if let Some(path) = bootstrap_config_path {
@@ -199,6 +200,11 @@ pub(crate) fn save_config_to_db(db_path: &Path, config: &ServiceConfig) -> Resul
 }
 
 pub(crate) fn normalize_config(mut config: ServiceConfig) -> Result<ServiceConfig> {
+    for mount in &mut config.mounts {
+        if mount.mount_type == "system_config" {
+            mount.root_path = None;
+        }
+    }
     for key in &mut config.auth.keys {
         if let Some(plain) = key.plain_key.take() {
             if plain.len() < 8 {
@@ -239,13 +245,13 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # mounts: ordered mount table. Later mounts have higher priority.
 # mounts[].mount_path: service path, must start with /. Example: /quark or /pub
 # mounts[].type: quark_cookie, quark_open, system_config, url_tree, or github_releases.
-# mounts[].root_path:
+# mounts[].root_path: only for mounts backed by a remote tree.
 #   quark_cookie: human-readable Quark path to expose at mount_path.
 #   quark_open: human-readable Quark path to expose at mount_path.
-#   system_config: root_path must stay /; mount_path is where this config file is exposed.
 #   url_tree: upstream http(s) URL prefix. Read-only.
 #   github_releases: GitHub repo in owner/repo form. Read-only.
-# mounts[].enabled: false disables the mount without deleting it.
+#   system_config does not use root_path; mount_path is the config file path.
+# Disable a mount by commenting it out of this YAML.
 # mounts[].options:
 #   quark_cookie.cookie: Quark web cookie for this mount.
 #   quark_cookie.root_fid: optional Quark root fid for this mount. Default: 0.
@@ -311,7 +317,10 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
         }
         match mount.mount_type.as_str() {
             "quark_cookie" | "quark_open" => {
-                validate_abs_path(&mount.root_path, "root_path")?;
+                let Some(root_path) = mount.root_path.as_deref() else {
+                    bail!("{} mounts need root_path", mount.mount_type);
+                };
+                validate_abs_path(root_path, "root_path")?;
                 if mount.mount_type == "quark_cookie"
                     && let Some(cookie) = mount.options.get("cookie")
                 {
@@ -348,13 +357,21 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                 }
             }
             "url_tree" => {
-                validate_http_url(&mount.root_path, "root_path")?;
+                let Some(root_path) = mount.root_path.as_deref() else {
+                    bail!("url_tree mounts need root_path");
+                };
+                validate_http_url(root_path, "root_path")?;
                 if let Some(proxy) = mount.options.get("proxy").and_then(|value| value.as_str()) {
                     validate_http_url(proxy, "options.proxy")?;
                 }
             }
             "github_releases" => {
-                if mount.root_path.trim().is_empty()
+                if mount
+                    .root_path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
                     && mount
                         .options
                         .get("repo")
@@ -392,14 +409,16 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                 }
             }
             "system_config" => {
-                validate_abs_path(&mount.root_path, "root_path")?;
+                if mount.root_path.is_some() {
+                    bail!("system_config mounts do not use root_path");
+                }
                 if normalize_virtual_path(&mount.mount_path) == "/" {
                     bail!("system_config mount_path must be a file path, not /");
                 }
             }
             _ => unreachable!(),
         }
-        if mount.enabled && mount.mount_type == "system_config" {
+        if mount.mount_type == "system_config" {
             has_system_config = true;
         }
         if !mount_paths.insert(mount.mount_path.clone()) {
@@ -407,7 +426,7 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
         }
     }
     if !has_system_config {
-        bail!("config.mounts must contain at least one enabled system_config mount");
+        bail!("config.mounts must contain at least one system_config mount");
     }
 
     let mut names = HashSet::new();

@@ -1419,7 +1419,7 @@ async fn state_config_path(state: &AppState) -> String {
         .mounts
         .iter()
         .rev()
-        .find(|mount| mount.enabled && mount.mount_type == "system_config")
+        .find(|mount| mount.mount_type == "system_config")
         .map(|mount| mount.mount_path.clone())
         .unwrap_or_else(|| "/api/config.yaml".to_string())
 }
@@ -1473,7 +1473,6 @@ fn has_virtual_directory(config: &ServiceConfig, virtual_path: &str) -> bool {
     config
         .mounts
         .iter()
-        .filter(|mount| mount.enabled)
         .map(|mount| normalize_browser_virtual_path(&mount.mount_path))
         .any(|mount_path| mount_path == current || mount_path.starts_with(&prefix))
 }
@@ -1485,7 +1484,7 @@ async fn browser_virtual_entries_json(state: &AppState, virtual_path: &str) -> O
     let mut seen = std::collections::HashSet::new();
 
     for mount in &config.mounts {
-        if !mount.enabled || mount.mount_path == "/" {
+        if mount.mount_path == "/" {
             continue;
         }
         let normalized = normalize_browser_virtual_path(&mount.mount_path);
@@ -1885,8 +1884,7 @@ async fn list_objects(
         }
         Some(ResolvedMount::GithubReleases { rest, config }) => {
             if rest.trim_matches('/').is_empty() {
-                return list_github_releases(&config, headers, &bucket, prefix.trim_matches('/'))
-                    .await;
+                return list_github_releases(&config, headers, &bucket, &prefix).await;
             }
             return list_xml(
                 &bucket,
@@ -2419,9 +2417,9 @@ async fn list_github_releases(
     let entries = entries
         .into_iter()
         .map(|mut entry| {
-            let prefix = prefix.trim_matches('/');
-            if !prefix.is_empty() {
-                entry.key = format!("{prefix}/{}", entry.key);
+            let key_prefix = prefix.trim_matches('/');
+            if !key_prefix.is_empty() {
+                entry.key = format!("{key_prefix}/{}", entry.key);
             }
             entry
         })
@@ -3385,8 +3383,7 @@ mod tests {
         MountConfig {
             mount_path: mount_path.to_string(),
             mount_type: "quark_cookie".to_string(),
-            root_path: root_path.to_string(),
-            enabled: true,
+            root_path: Some(root_path.to_string()),
             options: Value::Null,
         }
     }
@@ -3478,18 +3475,14 @@ mounts:
   - mount_path: /quark
     type: quark_open
     root_path: /
-    enabled: true
     options:
       oauth_file: /data/quark-open-oauth.yaml
   - mount_path: /api/config.yaml
     type: system_config
-    root_path: /
-    enabled: true
 auth:
   keys: []
   rules: []
 cache:
-  enabled: true
   ttl_seconds: 600
   max_bytes: 1048576
 "#,
@@ -3529,15 +3522,13 @@ cache:
             MountConfig {
                 mount_path: "/github".to_string(),
                 mount_type: "url_tree".to_string(),
-                root_path: "https://github.com/example-org/releases".to_string(),
-                enabled: true,
+                root_path: Some("https://github.com/example-org/releases".to_string()),
                 options: json!({"proxy": "http://127.0.0.1:1080"}),
             },
             MountConfig {
                 mount_path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
-                root_path: "/".to_string(),
-                enabled: true,
+                root_path: None,
                 options: Value::Null,
             },
         ]);
@@ -3603,8 +3594,7 @@ cache:
             MountConfig {
                 mount_path: "/clients/hiddify".to_string(),
                 mount_type: "github_releases".to_string(),
-                root_path: "hiddify/hiddify-app".to_string(),
-                enabled: true,
+                root_path: Some("hiddify/hiddify-app".to_string()),
                 options: json!({
                     "asset_allow": ["*MacOS.dmg", "*Windows*.zip"],
                     "show_source_code": true,
@@ -3614,8 +3604,7 @@ cache:
             MountConfig {
                 mount_path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
-                root_path: "/".to_string(),
-                enabled: true,
+                root_path: None,
                 options: Value::Null,
             },
         ]);
@@ -3679,6 +3668,26 @@ cache:
         );
         assert!(github_release_file(&release, &config, "app.dmg").is_some());
         assert!(github_release_file(&release, &config, "app.apk").is_none());
+    }
+
+    #[tokio::test]
+    async fn github_release_list_preserves_directory_prefix_slash() {
+        let response = list_xml_entries(
+            "atree",
+            "hiddify/",
+            Some("/"),
+            vec![S3Entry {
+                key: "hiddify/app.dmg".to_string(),
+                size: 42,
+                modified: 1_700_000_000_000,
+            }],
+            Vec::new(),
+            1000,
+            None,
+        );
+        let body = response_text(response).await;
+        assert!(body.contains("<Prefix>hiddify/</Prefix>"));
+        assert!(body.contains("<Key>hiddify/app.dmg</Key>"));
     }
 
     #[test]
@@ -3761,7 +3770,7 @@ cache:
     #[test]
     fn invalid_config_is_rejected() {
         let mut config = ServiceConfig::default();
-        config.mounts[0].root_path = "../bad".to_string();
+        config.mounts[0].root_path = Some("../bad".to_string());
         assert!(validate_config(&config).is_err());
 
         let mut config = ServiceConfig::default();
@@ -3992,7 +4001,6 @@ cache:
   - mount_path: bad
     type: quark_cookie
     root_path: /
-    enabled: true
 "#,
                     ))
                     .unwrap(),
@@ -4008,27 +4016,22 @@ cache:
 
         let good_config = r#"
 mounts:
-  - mount_path: /
+  - mount_path: /quark
     type: quark_cookie
     root_path: /
     options:
       cookie: placeholder-cookie
-    enabled: true
   - mount_path: /api/config.yaml
     type: system_config
-    root_path: /
-    enabled: true
 auth:
   keys:
     - name: reader
       plain_key: reader-test-key
-      enabled: true
   rules:
     - principal: key:reader
       actions: [ListBucket]
       resources: [/*]
 cache:
-  enabled: true
   max_bytes: 1048576
 "#;
         let put = app
@@ -4073,26 +4076,21 @@ cache:
         let yaml_config = r#"
 # This comment should be ignored on PUT.
 mounts:
-  - mount_path: /
+  - mount_path: /quark
     type: quark_cookie
     root_path: /
-    enabled: false
   - mount_path: /api/config.yaml
     type: system_config
-    root_path: /
-    enabled: true
 auth:
   keys:
     # plain_key is accepted only on write and removed on read.
     - name: yaml-reader
       plain_key: yaml-reader-key
-      enabled: true
   rules:
     - principal: key:yaml-reader
       actions: [ListBucket, GetObject]
       resources: [/*]
 cache:
-  enabled: true
   max_bytes: 2097152
 "#;
         let put = app
@@ -4145,22 +4143,17 @@ mounts:
   - mount_path: /
     type: quark_cookie
     root_path: /
-    enabled: true
   - mount_path: /api/config.yaml
     type: system_config
-    root_path: /
-    enabled: true
 auth:
   keys:
     - name: config-editor
       plain_key: config-editor-key
-      enabled: true
   rules:
     - principal: key:config-editor
       actions: [GetObject, PutObject]
       resources: [/api/config.yaml]
 cache:
-  enabled: true
   max_bytes: 1048576
 "#;
         let bootstrap = app
@@ -4214,25 +4207,20 @@ cache:
         let app = build_app(test_state());
         let moved_config = r#"
 mounts:
-  - mount_path: /
+  - mount_path: /quark
     type: quark_cookie
     root_path: /
-    enabled: false
   - mount_path: /system/live.yaml
     type: system_config
-    root_path: /
-    enabled: true
 auth:
   keys:
     - name: config-reader
       plain_key: config-reader-key
-      enabled: true
   rules:
     - principal: key:config-reader
       actions: [GetObject]
       resources: [/system/live.yaml]
 cache:
-  enabled: true
   max_bytes: 1048576
 "#;
         let put = app
@@ -4301,22 +4289,19 @@ cache:
                 MountConfig {
                     mount_path: "/".to_string(),
                     mount_type: "quark_cookie".to_string(),
-                    root_path: "/".to_string(),
-                    enabled: true,
+                    root_path: Some("/".to_string()),
                     options: Value::Null,
                 },
                 MountConfig {
                     mount_path: "/api/config.yaml".to_string(),
                     mount_type: "system_config".to_string(),
-                    root_path: "/".to_string(),
-                    enabled: true,
+                    root_path: None,
                     options: Value::Null,
                 },
                 MountConfig {
                     mount_path: "/github".to_string(),
                     mount_type: "url_tree".to_string(),
-                    root_path: format!("http://{addr}/files"),
-                    enabled: true,
+                    root_path: Some(format!("http://{addr}/files")),
                     options: Value::Null,
                 },
             ],
@@ -4353,8 +4338,7 @@ cache:
             mounts: vec![MountConfig {
                 mount_path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
-                root_path: "/".to_string(),
-                enabled: true,
+                root_path: None,
                 options: Value::Null,
             }],
             auth: AuthConfig::default(),
@@ -4382,8 +4366,7 @@ cache:
             mounts: vec![MountConfig {
                 mount_path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
-                root_path: "/".to_string(),
-                enabled: true,
+                root_path: None,
                 options: Value::Null,
             }],
             auth: AuthConfig::default(),

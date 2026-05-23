@@ -104,12 +104,12 @@ pub(crate) fn resolve_mount(
         .mounts
         .iter()
         .rev()
-        .find(|mount| mount.enabled && mount_matches_for_type(mount, &path))?;
+        .find(|mount| mount_matches_for_type(mount, &path))?;
     match mount.mount_type.as_str() {
         "quark_cookie" => {
             let rest = strip_mount_path(&mount.mount_path, &path);
             Some(ResolvedMount::Quark {
-                remote_key: join_remote_path(&mount.root_path, rest),
+                remote_key: join_remote_path(config::mount_root_path(mount), rest),
                 cookie: mount_option_string(&mount.options, "cookie").unwrap_or_default(),
                 root_fid: mount_option_string(&mount.options, "root_fid")
                     .unwrap_or_else(|| "0".to_string()),
@@ -118,7 +118,7 @@ pub(crate) fn resolve_mount(
         "quark_open" => {
             let rest = strip_mount_path(&mount.mount_path, &path);
             Some(ResolvedMount::QuarkOpen {
-                remote_key: join_remote_path(&mount.root_path, rest),
+                remote_key: join_remote_path(config::mount_root_path(mount), rest),
                 config: quark_open_config_from_options(&mount.options)?,
             })
         }
@@ -128,7 +128,7 @@ pub(crate) fn resolve_mount(
         "url_tree" => {
             let rest = strip_mount_path(&mount.mount_path, &path);
             Some(ResolvedMount::UrlTree {
-                url: join_url_path(&mount.root_path, rest)?,
+                url: join_url_path(config::mount_root_path(mount), rest)?,
                 proxy: mount
                     .options
                     .get("proxy")
@@ -207,7 +207,7 @@ fn mount_option_string_list(options: &serde_json::Value, key: &str) -> Vec<Strin
 
 fn github_releases_config_from_mount(mount: &config::MountConfig) -> Option<GithubReleasesConfig> {
     let repo = mount_option_string(&mount.options, "repo").or_else(|| {
-        let root = mount.root_path.trim().trim_matches('/');
+        let root = config::mount_root_path(mount).trim().trim_matches('/');
         (!root.is_empty()).then(|| root.to_string())
     })?;
 

@@ -61,7 +61,6 @@ mounts:
   - mount_path: /quark
     type: quark_cookie
     root_path: /
-    enabled: true
     options:
       cookie: '<从 pan.quark.cn 抓到的 Cookie>'
       root_fid: '0'
@@ -74,7 +73,6 @@ mounts:
   - mount_path: /quark
     type: quark_open
     root_path: /
-    enabled: true
     options:
       oauth_file: quark-open-oauth.yaml
       root_fid: '0'
@@ -104,11 +102,8 @@ mounts:
   - mount_path: /
     type: quark_cookie
     root_path: /
-    enabled: true
   - mount_path: /system/live.yaml
     type: system_config
-    root_path: /
-    enabled: true
 ```
 
 外部只读文件可以用 `url_tree` 挂载。`root_path` 是上游 http(s) URL 前缀，`options.proxy` 只影响这个挂载，适合把 raw URL、固定版本下载地址等资源通过服务端和本机代理中转出来。这里的挂载类型叫 `url_tree`，代理只是访问选项：
@@ -118,7 +113,6 @@ mounts:
   - mount_path: /github/sing-box
     type: url_tree
     root_path: https://github.com/SagerNet/sing-box/releases/download/v1.12.0
-    enabled: true
     options:
       proxy: http://127.0.0.1:1080
 auth:
@@ -137,7 +131,6 @@ mounts:
   - mount_path: /hiddify
     type: github_releases
     root_path: hiddify/hiddify-app
-    enabled: true
     options:
       proxy: http://127.0.0.1:1080
       token: <github token>

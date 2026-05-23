@@ -1496,11 +1496,12 @@ async fn browser_virtual_entries_json(state: &AppState, virtual_path: &str) -> O
             if first.is_empty() || !seen.insert(first.to_string()) {
                 continue;
             }
-            let is_file = normalized.trim_start_matches('/').split('/').count() == 1;
+            let is_file = mount.mount_type == "system_config"
+                && normalized.trim_start_matches('/').split('/').count() == 1;
             entries.push(json!({
                 "type": if is_file { "file" } else { "dir" },
                 "name": first,
-                "href": format!("/{}/", first),
+                "href": if is_file { format!("/{first}") } else { format!("/{first}/") },
             }));
             continue;
         }
@@ -1687,8 +1688,8 @@ async fn object_handler(
         let config = state.config.read().await;
         let is_virtual_dir = has_virtual_directory(&config, &virtual_path);
         drop(config);
-        if is_virtual_dir {
-            return browser_directory(&state, &virtual_path, &headers, false).await;
+        if is_virtual_dir || has_trailing_slash {
+            return browser_directory(&state, &virtual_path, &headers, true).await;
         }
     }
     if virtual_path == "/" {
@@ -3844,6 +3845,7 @@ cache:
         assert_eq!(root.status(), StatusCode::OK);
         let body = response_text(root).await;
         assert!(body.contains("\"name\":\"api\""));
+        assert!(body.contains("\"href\":\"/api/\""));
     }
 
     #[tokio::test]
@@ -3918,6 +3920,27 @@ cache:
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
         assert!(body.contains("\"name\":\"config.yaml\""));
+    }
+
+    #[tokio::test]
+    async fn browser_directory_under_mount_returns_shell_without_request_auth() {
+        let app = build_app(test_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/quark/some-dir/")
+                    .header(header::ACCEPT, "text/html")
+                    .header(header::USER_AGENT, "Mozilla/5.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("var DIRECTORY_ENTRIES = null;"));
+        assert!(body.contains("u.searchParams.set('atree-browser-list', '1');"));
     }
 
     #[tokio::test]

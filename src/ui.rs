@@ -317,11 +317,12 @@ pub(crate) fn file_browser_html(
       var links = ['<span>/</span>'];
       var acc = '';
       for (var i = 0; i < parts.length; i += 1) {{
-        acc += '/' + encodeURIComponent(parts[i]);
+        var part = decodePathPart(parts[i]);
+        acc += '/' + encodeURIComponent(part);
         if (i + 1 < parts.length) {{
-          links.push('<a href="' + acc + '/">' + escapeHtml(decodePathPart(parts[i])) + '</a>');
+          links.push('<a href="' + acc + '/">' + escapeHtml(part) + '</a>');
         }} else {{
-          links.push('<span>' + escapeHtml(decodePathPart(parts[i])) + '</span>');
+          links.push('<span>' + escapeHtml(part) + '</span>');
         }}
         links.push('<span>/</span>');
       }}

@@ -31,12 +31,10 @@ pub(crate) fn wants_html(headers: &HeaderMap) -> bool {
 }
 
 pub(crate) fn file_browser_html(
-    bucket: &str,
     config_path: &str,
     directory_entries_json: &str,
     directory_error_json: &str,
 ) -> String {
-    let bucket_json = serde_json::to_string(bucket).unwrap_or_else(|_| "\"quark\"".to_string());
     let config_path_json =
         serde_json::to_string(config_path).unwrap_or_else(|_| "\"/api/config.yaml\"".to_string());
     format!(
@@ -104,7 +102,6 @@ pub(crate) fn file_browser_html(
     <div id="helpLine" class="help"></div>
   </main>
   <script>
-    var BUCKET = {bucket_json};
     var CONFIG_PATH = {config_path_json};
     var DIRECTORY_ENTRIES = {directory_entries_json};
     var DIRECTORY_ERROR = {directory_error_json};
@@ -114,9 +111,6 @@ pub(crate) fn file_browser_html(
     var crumbs = document.getElementById('crumbs');
     var helpLine = document.getElementById('helpLine');
 
-    function startsWith(value, prefix) {{
-      return value.slice(0, prefix.length) === prefix;
-    }}
     function decodePathPart(value) {{
       try {{
         return decodeURIComponent(value);
@@ -130,12 +124,10 @@ pub(crate) fn file_browser_html(
       if (keyInput.value !== key) keyInput.value = key;
     }}
     function s3Path() {{
-      var path = location.pathname === '/' ? '/' + BUCKET + '/' : location.pathname;
-      return path.slice(-1) === '/' ? path : path + '/';
+      return location.pathname.slice(-1) === '/' ? location.pathname : location.pathname + '/';
     }}
     function keyPrefixFromPath() {{
-      var parts = s3Path().split('/').filter(Boolean);
-      if (parts[0] === BUCKET) parts.shift();
+      var parts = location.pathname.split('/').filter(Boolean);
       for (var i = 0; i < parts.length; i += 1) {{
         parts[i] = decodePathPart(parts[i]);
       }}
@@ -153,9 +145,6 @@ pub(crate) fn file_browser_html(
       var u = new URL(location.pathname, location.origin);
       u.searchParams.set('atree-browser-list', '1');
       return u;
-    }}
-    function isSyntheticPath() {{
-      return location.pathname !== '/' && !startsWith(location.pathname, '/' + BUCKET + '/');
     }}
     function headers(accept) {{
       var h = {{ Accept: accept || 'application/xml' }};
@@ -324,30 +313,22 @@ pub(crate) fn file_browser_html(
         }});
     }}
     function renderCrumbs() {{
-      if (location.pathname === '/') {{
-        crumbs.innerHTML = '<span>/</span>';
-        return;
-      }}
-      if (!startsWith(location.pathname, '/' + BUCKET + '/')) {{
-        var parts = location.pathname.split('/').filter(Boolean);
-        var links = ['<span>/</span>'];
-        var acc = '';
-        for (var i = 0; i < parts.length; i += 1) {{
-          acc += '/' + encodeURIComponent(parts[i]);
-          links.push('<span>/</span>');
+      var parts = location.pathname.split('/').filter(Boolean);
+      var links = ['<span>/</span>'];
+      var acc = '';
+      for (var i = 0; i < parts.length; i += 1) {{
+        acc += '/' + encodeURIComponent(parts[i]);
+        if (i + 1 < parts.length) {{
           links.push('<a href="' + acc + '/">' + escapeHtml(decodePathPart(parts[i])) + '</a>');
+        }} else {{
+          links.push('<span>' + escapeHtml(decodePathPart(parts[i])) + '</span>');
         }}
-        crumbs.innerHTML = links.join('');
-        return;
+        links.push('<span>/</span>');
       }}
-      var bucketParts = keyPrefixFromPath().split('/').filter(Boolean);
-      var bucketLinks = ['<span>/</span><a href="/' + BUCKET + '/">' + escapeHtml(BUCKET) + '</a>'];
-      var bucketAcc = '';
-      for (var j = 0; j < bucketParts.length; j += 1) {{
-        bucketAcc += encodeURIComponent(bucketParts[j]) + '/';
-        bucketLinks.push('<span>/</span><a href="/' + BUCKET + '/' + bucketAcc + '">' + escapeHtml(decodePathPart(bucketParts[j])) + '</a>');
+      if (links.length > 1) {{
+        links.pop();
       }}
-      crumbs.innerHTML = bucketLinks.join('');
+      crumbs.innerHTML = links.join('');
     }}
     function renderItems(items) {{
       if (!items.length) {{
@@ -379,7 +360,7 @@ pub(crate) fn file_browser_html(
         renderItems(DIRECTORY_ENTRIES);
         return Promise.resolve();
       }}
-      if (location.pathname === '/' || isSyntheticPath()) {{
+      if (location.pathname === '/') {{
         return fetch(browserListUrl(), {{ headers: headers('application/json') }})
           .then(function(res) {{
             if (res.status === 403 || res.status === 401) {{
@@ -413,7 +394,7 @@ pub(crate) fn file_browser_html(
             for (var i = 0; i < prefixes.length; i += 1) {{
               var full = xmlText(prefixes[i], 'Prefix');
               var name = full.slice(prefix.length).replace(/\/$/, '');
-              if (name) items.push({{ type: 'dir', name: name, href: '/' + BUCKET + '/' + full }});
+              if (name) items.push({{ type: 'dir', name: name, href: '/' + full }});
             }}
             var contents = xmlNodes(doc, 'Contents');
             for (var j = 0; j < contents.length; j += 1) {{
@@ -423,7 +404,7 @@ pub(crate) fn file_browser_html(
               items.push({{
                 type: 'file',
                 name: fileName,
-                href: '/' + BUCKET + '/' + fullKey,
+                href: '/' + fullKey,
                 size: xmlText(contents[j], 'Size'),
                 time: xmlText(contents[j], 'LastModified')
               }});

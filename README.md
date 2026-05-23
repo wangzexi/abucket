@@ -58,7 +58,7 @@ curl -X PUT \
 ```yaml
 s3_bucket: atree
 mounts:
-  - mount_path: /
+  - mount_path: /quark
     type: quark_cookie
     root_path: /
     enabled: true
@@ -71,7 +71,7 @@ mounts:
 
 ```yaml
 mounts:
-  - mount_path: /
+  - mount_path: /quark
     type: quark_open
     root_path: /
     enabled: true
@@ -179,11 +179,11 @@ export RESTIC_PASSWORD='你的 restic 仓库密码'
 export AWS_ACCESS_KEY_ID='你的 atree key'
 export AWS_SECRET_ACCESS_KEY=dummy
 
-restic -r 's3:http://127.0.0.1:9000/atree/restic-repo' \
+restic -r 's3:http://127.0.0.1:9000/quark/restic-repo' \
   -o s3.bucket-lookup=path \
   init
 
-restic -r 's3:http://127.0.0.1:9000/atree/restic-repo' \
+restic -r 's3:http://127.0.0.1:9000/quark/restic-repo' \
   -o s3.bucket-lookup=path \
   backup ~/Documents
 ```
@@ -191,7 +191,7 @@ restic -r 's3:http://127.0.0.1:9000/atree/restic-repo' \
 如果要放到夸克的某个目录里，可以直接把目录写进 repo path，例如：
 
 ```bash
-restic -r 's3:http://127.0.0.1:9000/atree/我的备份/restic-repo' \
+restic -r 's3:http://127.0.0.1:9000/quark/我的备份/restic-repo' \
   -o s3.bucket-lookup=path \
   snapshots
 ```
@@ -201,9 +201,9 @@ restic -r 's3:http://127.0.0.1:9000/atree/我的备份/restic-repo' \
 也可以用 `curl`：
 
 ```bash
-curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/atree?list-type=2&delimiter=/'
-curl -H 'Authorization: Bearer <key>' -T /tmp/atree.txt 'http://127.0.0.1:9000/atree/examples/atree.txt'
-curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/atree/examples/atree.txt'
+curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/quark?list-type=2&delimiter=/'
+curl -H 'Authorization: Bearer <key>' -T /tmp/atree.txt 'http://127.0.0.1:9000/quark/examples/atree.txt'
+curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/quark/examples/atree.txt'
 ```
 
 MinIO JS SDK 的 path-style 用法也应该可用：

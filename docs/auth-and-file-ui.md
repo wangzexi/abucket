@@ -90,8 +90,8 @@ This uses standard HTTP content negotiation, so no `?format=html` or `?format=s3
 Examples:
 
 ```bash
-curl -H 'Accept: application/xml' 'http://127.0.0.1:9000/atree/public/'
-curl -H 'Accept: text/html' 'http://127.0.0.1:9000/atree/public/'
+curl -H 'Accept: application/xml' 'http://127.0.0.1:9000/public/'
+curl -H 'Accept: text/html' 'http://127.0.0.1:9000/public/'
 ```
 
 This keeps one URL space while making both humans and curl-using AI agents comfortable.
@@ -101,7 +101,7 @@ This keeps one URL space while making both humans and curl-using AI agents comfo
 Browser request:
 
 ```http
-GET /atree/public/
+GET /public/
 Accept: text/html
 User-Agent: Mozilla/...
 ```
@@ -117,13 +117,13 @@ directory handling:
 This makes a directory usable as a small static website. For example, visiting:
 
 ```text
-/atree/public/site/
+/public/site/
 ```
 
 can serve:
 
 ```text
-/atree/public/site/index.html
+/public/site/index.html
 ```
 
 The HTML file browser shell is only the fallback when there is no index file.
@@ -131,7 +131,7 @@ The HTML file browser shell is only the fallback when there is no index file.
 If the fallback file browser shell is returned, it reads the key from `localStorage`, then requests the same path with a browser-list query and auth header to render the listing:
 
 ```text
-GET /atree/public/?atree-browser-list=1
+GET /public/?atree-browser-list=1
 Authorization: Bearer <key>
 Accept: application/json
 ```
@@ -141,7 +141,7 @@ If no key is stored, it tries anonymously. If the listing returns `AccessDenied`
 Programmatic request:
 
 ```http
-GET /atree/public/?list-type=2&delimiter=/
+GET /public/?list-type=2&delimiter=/
 Accept: application/xml
 ```
 
@@ -151,7 +151,7 @@ Response:
 S3 ListBucket XML
 ```
 
-Plain `curl /atree/public/` without browser headers can keep returning the S3-compatible response, even if that response is empty or XML-ish. The browser UI is mainly selected for real browser navigation.
+Plain `curl /public/` without browser headers can keep returning the S3-compatible response, even if that response is empty or XML-ish. The browser UI is mainly selected for real browser navigation.
 
 ### Directory Index File Lookup
 
@@ -199,7 +199,7 @@ For non-browser clients, keep S3 listing behavior instead of serving index files
 Browser or programmatic request:
 
 ```http
-GET /atree/public/photo.jpg
+GET /public/photo.jpg
 ```
 
 Response:
@@ -503,7 +503,7 @@ The effective config returned by `GET /api/config.yaml` can look like:
 ```yaml
 s3_bucket: atree
 mounts:
-  - mount_path: /
+  - mount_path: /quark
     type: quark_cookie
     root_path: /
     enabled: true

@@ -281,11 +281,11 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # Examples:
 #   curl -H 'Authorization: Bearer <root-key>' '{public_base_url}{config_path}'
 #   curl -X PUT -H 'Authorization: Bearer <root-key>' --data @config.yaml '{public_base_url}{config_path}'
-#   curl -I -H 'Authorization: Bearer <key>' '{public_base_url}/atree/public/example.txt'
-#   curl -H 'Authorization: Bearer <key>' '{public_base_url}/atree?list-type=2&delimiter=/&prefix=public/'
-#   curl -X PUT -H 'Authorization: Bearer <key>' -T ./example.txt '{public_base_url}/atree/public/example.txt'
-#   curl -H 'Accept: text/html' '{public_base_url}/atree/public/'
-#   curl -H 'Accept: application/xml' '{public_base_url}/atree/public/'
+#   curl -I -H 'Authorization: Bearer <key>' '{public_base_url}/public/example.txt'
+#   curl -H 'Authorization: Bearer <key>' '{public_base_url}/?list-type=2&delimiter=/&prefix=public/'
+#   curl -X PUT -H 'Authorization: Bearer <key>' -T ./example.txt '{public_base_url}/public/example.txt'
+#   curl -H 'Accept: text/html' '{public_base_url}/public/'
+#   curl -H 'Accept: application/xml' '{public_base_url}/public/'
 
 "#
     )

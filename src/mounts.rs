@@ -99,27 +99,12 @@ pub(crate) fn resolve_mount(
     config: &config::ServiceConfig,
     virtual_path: &str,
 ) -> Option<ResolvedMount> {
-    resolve_mount_inner(config, virtual_path, true)
-}
-
-pub(crate) fn resolve_explicit_mount(
-    config: &config::ServiceConfig,
-    virtual_path: &str,
-) -> Option<ResolvedMount> {
-    resolve_mount_inner(config, virtual_path, false)
-}
-
-fn resolve_mount_inner(
-    config: &config::ServiceConfig,
-    virtual_path: &str,
-    include_root_mount: bool,
-) -> Option<ResolvedMount> {
     let path = normalize_virtual_path(virtual_path);
-    let mount = config.mounts.iter().rev().find(|mount| {
-        mount.enabled
-            && (include_root_mount || normalize_virtual_path(&mount.mount_path) != "/")
-            && mount_matches_for_type(mount, &path)
-    })?;
+    let mount = config
+        .mounts
+        .iter()
+        .rev()
+        .find(|mount| mount.enabled && mount_matches_for_type(mount, &path))?;
     match mount.mount_type.as_str() {
         "quark_cookie" => {
             let rest = strip_mount_path(&mount.mount_path, &path);

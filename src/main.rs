@@ -11,13 +11,13 @@ mod config;
 mod mounts;
 mod ui;
 
-use crate::mounts::{
-    GithubReleasesConfig, QuarkOpenConfig, ResolvedMount, backend_from_mount, github_client,
-    is_fnnas_quark_refresh_url, persist_quark_open_config, quark_client,
-    quark_open_client, resolve_explicit_mount, resolve_mount,
-};
 #[cfg(test)]
 use crate::mounts::resolve_remote_key;
+use crate::mounts::{
+    GithubReleasesConfig, QuarkOpenConfig, ResolvedMount, backend_from_mount, github_client,
+    is_fnnas_quark_refresh_url, persist_quark_open_config, quark_client, quark_open_client,
+    resolve_mount,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Json, Router,
@@ -1427,9 +1427,7 @@ async fn state_config_path(state: &AppState) -> String {
 fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/", any(root_handler))
-        .route("/{bucket}", any(bucket_handler))
-        .route("/{bucket}/", any(bucket_handler))
-        .route("/{bucket}/{*key}", any(object_handler))
+        .route("/{*path}", any(object_handler))
         .with_state(state)
 }
 
@@ -1482,19 +1480,9 @@ fn has_virtual_directory(config: &ServiceConfig, virtual_path: &str) -> bool {
 
 async fn browser_virtual_entries_json(state: &AppState, virtual_path: &str) -> Option<String> {
     let current = normalize_browser_virtual_path(virtual_path);
-    let bucket = state_bucket(state).await;
     let config = state.config.read().await;
     let mut entries = Vec::new();
     let mut seen = std::collections::HashSet::new();
-
-    if current == "/" {
-        entries.push(json!({
-            "type": "dir",
-            "name": bucket.clone(),
-            "href": format!("/{}/", bucket),
-        }));
-        seen.insert(bucket);
-    }
 
     for mount in &config.mounts {
         if !mount.enabled || mount.mount_path == "/" {
@@ -1508,8 +1496,9 @@ async fn browser_virtual_entries_json(state: &AppState, virtual_path: &str) -> O
             if first.is_empty() || !seen.insert(first.to_string()) {
                 continue;
             }
+            let is_file = normalized.trim_start_matches('/').split('/').count() == 1;
             entries.push(json!({
-                "type": "dir",
+                "type": if is_file { "file" } else { "dir" },
                 "name": first,
                 "href": format!("/{}/", first),
             }));
@@ -1553,18 +1542,12 @@ async fn root_handler(
     method: Method,
     headers: HeaderMap,
 ) -> Response {
-    let bucket = state_bucket(&state).await;
+    let _bucket = state_bucket(&state).await;
     let config_path = state_config_path(&state).await;
     let raw_query = raw_query.unwrap_or_default();
     let params = parse_query(&raw_query);
-    if method == Method::GET && params.contains_key("atree-browser-list") {
-        return browser_virtual_entries_response(&state, &headers, "/").await;
-    }
-    if method == Method::GET && wants_html(&headers) {
-        return html_response(
-            StatusCode::OK,
-            file_browser_html(&bucket, &config_path, "null", "null"),
-        );
+    if method == Method::HEAD {
+        return StatusCode::OK.into_response();
     }
     if method != Method::GET {
         return s3_error(
@@ -1573,14 +1556,33 @@ async fn root_handler(
             "unsupported method",
         );
     }
-    let xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-  <Buckets><Bucket><Name>{}</Name></Bucket></Buckets>
-</ListAllMyBucketsResult>"#,
-        xml_escape(&bucket)
-    );
-    xml_response(StatusCode::OK, xml)
+    if method == Method::GET && params.contains_key("atree-browser-list") {
+        return browser_virtual_entries_response(&state, &headers, "/").await;
+    }
+    if method == Method::GET && wants_html(&headers) {
+        return html_response(
+            StatusCode::OK,
+            file_browser_html(&config_path, "null", "null"),
+        );
+    }
+    if params.contains_key("location") {
+        return xml_response(
+            StatusCode::OK,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>"#
+                .to_string(),
+        );
+    }
+    if params.contains_key("list-type")
+        || params.contains_key("prefix")
+        || params.contains_key("delimiter")
+        || params.contains_key("max-keys")
+        || params.contains_key("marker")
+        || params.contains_key("continuation-token")
+    {
+        return list_objects(state, raw_query, "/", &headers).await;
+    }
+    list_objects(state, raw_query, "/", &headers).await
 }
 
 async fn config_handler(
@@ -1660,164 +1662,55 @@ fn request_public_base_url(headers: &HeaderMap) -> String {
     format!("{scheme}://{host}")
 }
 
-async fn bucket_handler(
-    State(state): State<AppState>,
-    Path(bucket): Path<String>,
-    RawQuery(raw_query): RawQuery,
-    method: Method,
-    headers: HeaderMap,
-) -> Response {
-    let current_bucket = state_bucket(&state).await;
-    if bucket != current_bucket {
-        let virtual_path = format!("/{}", percent_decode_path(&bucket).trim_matches('/'));
-        let query = raw_query.as_deref().unwrap_or_default();
-        let params = parse_query(query);
-        if method == Method::GET && params.contains_key("atree-browser-list") {
-            return browser_virtual_entries_response(&state, &headers, &virtual_path).await;
-        }
-        if method == Method::GET && wants_html(&headers) {
-            let config = state.config.read().await;
-            let is_virtual_dir = has_virtual_directory(&config, &virtual_path);
-            drop(config);
-            if is_virtual_dir {
-                return browser_directory(&state, &virtual_path, &headers, true).await;
-            }
-        }
-        let config = state.config.read().await;
-        let mount = resolve_explicit_mount(&config, &virtual_path);
-        drop(config);
-        match mount {
-            Some(ResolvedMount::SystemConfig { virtual_path }) => {
-                return system_file_handler(&state, method, &headers, Bytes::new(), &virtual_path)
-                    .await;
-            }
-            Some(ResolvedMount::UrlTree { url, proxy }) => {
-                let action = match method {
-                    Method::GET => "GetObject",
-                    Method::HEAD => "HeadObject",
-                    _ => "Unknown",
-                };
-                if !is_authorized(&state, &headers, action, &virtual_path).await {
-                    return access_denied_response(&state, &headers, &current_bucket).await;
-                }
-                return url_object(method, &headers, url, proxy).await;
-            }
-            Some(ResolvedMount::GithubReleases { rest, config }) => {
-                let action = match method {
-                    Method::GET => "ListBucket",
-                    Method::HEAD => "HeadObject",
-                    _ => "Unknown",
-                };
-                if !is_authorized(&state, &headers, action, &virtual_path).await {
-                    return access_denied_response(&state, &headers, &current_bucket).await;
-                }
-                return github_releases_object(method, &headers, rest, config).await;
-            }
-            _ => {}
-        }
-        return s3_error(StatusCode::NOT_FOUND, "NoSuchBucket", "bucket not found");
-    }
-    let raw_query = raw_query.unwrap_or_default();
-    if method == Method::GET && parse_query(&raw_query).contains_key("location") {
-        return xml_response(
-            StatusCode::OK,
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>"#
-                .to_string(),
-        );
-    }
-    if method == Method::GET && wants_html(&headers) {
-        return browser_directory(&state, "/", &headers, false).await;
-    }
-    match method {
-        Method::GET => list_objects(state, raw_query, "/", &headers).await,
-        Method::HEAD => StatusCode::OK.into_response(),
-        Method::PUT => StatusCode::OK.into_response(),
-        _ => s3_error(
-            StatusCode::METHOD_NOT_ALLOWED,
-            "MethodNotAllowed",
-            "unsupported method",
-        ),
-    }
-}
-
 async fn object_handler(
     State(state): State<AppState>,
-    Path((bucket, key)): Path<(String, String)>,
+    Path(path): Path<String>,
     RawQuery(raw_query): RawQuery,
     method: Method,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let key = percent_decode_path(&key);
-    let current_bucket = state_bucket(&state).await;
-    let is_bucket_path = bucket == current_bucket;
-    let virtual_path = if is_bucket_path {
-        format!("/{}", key.trim_start_matches('/'))
+    let bucket = state_bucket(&state).await;
+    let path = percent_decode_path(&path);
+    let has_trailing_slash = path.ends_with('/') && !path.is_empty();
+    let virtual_path = if has_trailing_slash {
+        format!("/{}/", path.trim_matches('/'))
     } else {
-        let bucket = percent_decode_path(&bucket);
-        format!(
-            "/{}/{}",
-            bucket.trim_matches('/'),
-            key.trim_start_matches('/')
-        )
+        format!("/{}", path.trim_matches('/'))
     };
-    if key.trim_matches('/').is_empty() {
-        if !is_bucket_path {
-            let query = raw_query.as_deref().unwrap_or_default();
-            let params = parse_query(query);
-            if method == Method::GET && params.contains_key("atree-browser-list") {
-                return browser_virtual_entries_response(&state, &headers, &virtual_path).await;
-            }
-            if method == Method::GET && wants_html(&headers) {
-                let config = state.config.read().await;
-                let is_virtual_dir = has_virtual_directory(&config, &virtual_path);
-                drop(config);
-                if is_virtual_dir {
-                    return browser_directory(&state, &virtual_path, &headers, true).await;
-                }
-            }
-            let config = state.config.read().await;
-            let mount = resolve_explicit_mount(&config, &virtual_path);
-            drop(config);
-            if let Some(ResolvedMount::SystemConfig { virtual_path }) = mount {
-                return system_file_handler(&state, method, &headers, body, &virtual_path).await;
-            }
-            return s3_error(StatusCode::NOT_FOUND, "NoSuchBucket", "bucket not found");
+    let raw_query = raw_query.unwrap_or_default();
+    let query = parse_query(&raw_query);
+    if query.contains_key("atree-browser-list") {
+        return browser_virtual_entries_response(&state, &headers, &virtual_path).await;
+    }
+    if method == Method::GET && wants_html(&headers) {
+        let config = state.config.read().await;
+        let is_virtual_dir = has_virtual_directory(&config, &virtual_path);
+        drop(config);
+        if is_virtual_dir {
+            return browser_directory(&state, &virtual_path, &headers, false).await;
         }
-        return match method {
-            Method::GET if wants_html(&headers) => {
-                browser_directory(&state, "/", &headers, false).await
-            }
-            Method::GET => list_objects(state, raw_query.unwrap_or_default(), "/", &headers).await,
-            Method::HEAD | Method::PUT => StatusCode::OK.into_response(),
-            _ => s3_error(
-                StatusCode::METHOD_NOT_ALLOWED,
-                "MethodNotAllowed",
-                "unsupported method",
-            ),
-        };
     }
-    if method == Method::GET && key.ends_with('/') && wants_html(&headers) {
-        return browser_directory(&state, &virtual_path, &headers, false).await;
+    if virtual_path == "/" {
+        return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "key not found");
     }
-    if method == Method::GET && key.ends_with('/') {
-        return list_objects(
-            state,
-            raw_query.unwrap_or_default(),
-            &virtual_path,
-            &headers,
-        )
-        .await;
+    if method == Method::GET && has_trailing_slash {
+        return list_objects(state, raw_query, &virtual_path, &headers).await;
+    }
+    if method == Method::HEAD && has_trailing_slash {
+        return StatusCode::OK.into_response();
+    }
+    if method == Method::PUT && has_trailing_slash {
+        return s3_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "MethodNotAllowed",
+            "unsupported method",
+        );
     }
 
-    let params = parse_query(raw_query.as_deref().unwrap_or_default());
+    let params = parse_query(&raw_query);
     let config = state.config.read().await;
-    let resolved_mount = if is_bucket_path {
-        resolve_mount(&config, &virtual_path)
-    } else {
-        resolve_explicit_mount(&config, &virtual_path)
-    };
+    let resolved_mount = resolve_mount(&config, &virtual_path);
     let action = match method {
         Method::GET => "GetObject",
         Method::HEAD => "HeadObject",
@@ -1826,14 +1719,11 @@ async fn object_handler(
         _ => "Unknown",
     };
     if !is_authorized(&state, &headers, action, &virtual_path).await {
-        return access_denied_response(&state, &headers, &current_bucket).await;
+        return access_denied_response(&state, &headers, &bucket).await;
     }
     let mount = match resolved_mount {
         Some(mount) => mount,
-        None if is_bucket_path => {
-            return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "mount not found");
-        }
-        None => return s3_error(StatusCode::NOT_FOUND, "NoSuchBucket", "bucket not found"),
+        None => return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "mount not found"),
     };
     drop(config);
     let (remote_key, backend) = match mount {
@@ -1870,20 +1760,22 @@ async fn object_handler(
         }
     };
     if method == Method::POST && params.contains_key("uploads") {
-        return initiate_multipart_upload(&state, &key, &remote_key).await;
+        return initiate_multipart_upload(&state, &path, &remote_key).await;
     }
     if method == Method::PUT && params.contains_key("uploadId") && params.contains_key("partNumber")
     {
         return upload_multipart_part(&state, &params, body).await;
     }
     if method == Method::POST && params.contains_key("uploadId") {
-        return complete_multipart_upload(&state, &backend, &key, &remote_key, &params).await;
+        return complete_multipart_upload(&state, &backend, &path, &remote_key, &params).await;
     }
     if method == Method::DELETE && params.contains_key("uploadId") {
         return abort_multipart_upload(&state, &params).await;
     }
     let result = match method {
-        Method::GET => get_object_cached(&state, &backend, &virtual_path, &remote_key, &headers).await,
+        Method::GET => {
+            get_object_cached(&state, &backend, &virtual_path, &remote_key, &headers).await
+        }
         Method::HEAD => head_object_cached(&state, &backend, &virtual_path, &remote_key).await,
         Method::PUT => {
             let body = match decode_request_body(&headers, body) {
@@ -2210,7 +2102,9 @@ fn cached_object_response(
     let mut resp = if head_only {
         Response::new(Body::empty())
     } else if let Some((start, end)) = range {
-        Response::new(Body::from(cached.bytes.slice(start as usize..(end + 1) as usize)))
+        Response::new(Body::from(
+            cached.bytes.slice(start as usize..(end + 1) as usize),
+        ))
     } else {
         Response::new(Body::from(cached.bytes.clone()))
     };
@@ -2439,7 +2333,8 @@ async fn github_releases_object(
         return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "object not found");
     };
     if method == Method::HEAD {
-        return match github_release_head_response(headers, size, modified, content_type.as_deref()) {
+        return match github_release_head_response(headers, size, modified, content_type.as_deref())
+        {
             Ok(response) => response,
             Err(err) => s3_error_for(&err),
         };
@@ -2892,12 +2787,11 @@ async fn browser_directory(
     headers: &HeaderMap,
     synthetic: bool,
 ) -> Response {
-    let bucket = state_bucket(state).await;
     let config_path = state_config_path(state).await;
     let html = |error_json: &str| {
         html_response(
             StatusCode::OK,
-            file_browser_html(&bucket, &config_path, "null", error_json),
+            file_browser_html(&config_path, "null", error_json),
         )
     };
     if synthetic || virtual_path == "/" {
@@ -3196,11 +3090,11 @@ fn yaml_response(status: StatusCode, yaml: String) -> Response {
         .into_response()
 }
 
-fn access_denied(headers: &HeaderMap, bucket: &str, config_path: &str) -> Response {
+fn access_denied(headers: &HeaderMap, _bucket: &str, config_path: &str) -> Response {
     if wants_html(headers) {
         html_response(
             StatusCode::UNAUTHORIZED,
-            file_browser_html(bucket, config_path, "null", r#""需要访问 key。""#),
+            file_browser_html(config_path, "null", r#""需要访问 key。""#),
         )
     } else {
         s3_error(StatusCode::FORBIDDEN, "AccessDenied", "access denied")
@@ -3556,7 +3450,11 @@ mod tests {
         assert_eq!(loaded.unwrap().bytes, Bytes::from_static(b"hello cache"));
 
         invalidate_cached_object(&state, "/atree/demo.txt").await;
-        assert!(read_cached_object(&state, "/atree/demo.txt").await.is_none());
+        assert!(
+            read_cached_object(&state, "/atree/demo.txt")
+                .await
+                .is_none()
+        );
     }
 
     #[test]
@@ -3576,7 +3474,7 @@ mod tests {
             r#"
 s3_bucket: atree
 mounts:
-  - mount_path: /
+  - mount_path: /quark
     type: quark_open
     root_path: /
     enabled: true
@@ -3653,13 +3551,15 @@ cache:
                 if url == "https://github.com/example-org/releases/client.tar.gz"
                     && proxy.as_deref() == Some("http://127.0.0.1:1080")
         ));
-        assert!(!matches!(resolve_mount(&config, "/api/"), Some(ResolvedMount::SystemConfig { .. })));
+        assert!(!matches!(
+            resolve_mount(&config, "/api/"),
+            Some(ResolvedMount::SystemConfig { .. })
+        ));
     }
 
     #[test]
     fn quark_open_expired_response_is_detected_even_on_http_400() {
-        let body =
-            Bytes::from(r#"{"status":-1,"errno":11001,"error_info":"Access Token无效"}"#);
+        let body = Bytes::from(r#"{"status":-1,"errno":11001,"error_info":"Access Token无效"}"#);
         assert!(quark_open_response_expired(StatusCode::BAD_REQUEST, &body).unwrap());
     }
 
@@ -3667,9 +3567,10 @@ cache:
     fn quark_open_non_json_http_error_still_reports_http_failure() {
         let body = Bytes::from_static(b"upstream exploded");
         let err = quark_open_response_expired(StatusCode::BAD_GATEWAY, &body).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("quark open api http 502 Bad Gateway: upstream exploded"));
+        assert!(
+            err.to_string()
+                .contains("quark open api http 502 Bad Gateway: upstream exploded")
+        );
     }
 
     #[test]
@@ -3907,10 +3808,9 @@ cache:
             )
             .await
             .unwrap();
-        assert_eq!(xml_resp.status(), StatusCode::OK);
+        assert_eq!(xml_resp.status(), StatusCode::FORBIDDEN);
         let xml = response_text(xml_resp).await;
-        assert!(xml.contains("<ListAllMyBucketsResult"));
-        assert!(xml.contains("<Name>atree</Name>"));
+        assert!(xml.contains("<Code>AccessDenied"));
     }
 
     #[tokio::test]
@@ -3943,7 +3843,6 @@ cache:
             .unwrap();
         assert_eq!(root.status(), StatusCode::OK);
         let body = response_text(root).await;
-        assert!(body.contains("\"name\":\"atree\""));
         assert!(body.contains("\"name\":\"api\""));
     }
 
@@ -4013,9 +3912,9 @@ cache:
                     .header(header::USER_AGENT, "Mozilla/5.0")
                     .body(Body::empty())
                     .unwrap(),
-        )
-        .await
-        .unwrap();
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
         assert!(body.contains("var DIRECTORY_ENTRIES = null;"));
@@ -4069,6 +3968,8 @@ mounts:
   - mount_path: /
     type: quark_cookie
     root_path: /
+    options:
+      cookie: placeholder-cookie
     enabled: true
   - mount_path: /api/config.yaml
     type: system_config
@@ -4132,7 +4033,7 @@ mounts:
   - mount_path: /
     type: quark_cookie
     root_path: /
-    enabled: true
+    enabled: false
   - mount_path: /api/config.yaml
     type: system_config
     root_path: /
@@ -4273,7 +4174,7 @@ mounts:
   - mount_path: /
     type: quark_cookie
     root_path: /
-    enabled: true
+    enabled: false
   - mount_path: /system/live.yaml
     type: system_config
     root_path: /
@@ -4403,7 +4304,20 @@ cache:
 
     #[tokio::test]
     async fn old_json_config_route_is_not_exposed() {
-        let app = build_app(test_state());
+        let state = test_state();
+        *state.config.write().await = ServiceConfig {
+            s3_bucket: "atree".to_string(),
+            mounts: vec![MountConfig {
+                mount_path: "/api/config.yaml".to_string(),
+                mount_type: "system_config".to_string(),
+                root_path: "/".to_string(),
+                enabled: true,
+                options: Value::Null,
+            }],
+            auth: AuthConfig::default(),
+            cache: CacheConfig::default(),
+        };
+        let app = build_app(state);
         let response = app
             .oneshot(
                 Request::builder()
@@ -4419,7 +4333,20 @@ cache:
 
     #[tokio::test]
     async fn old_help_route_is_not_supported() {
-        let app = build_app(test_state());
+        let state = test_state();
+        *state.config.write().await = ServiceConfig {
+            s3_bucket: "atree".to_string(),
+            mounts: vec![MountConfig {
+                mount_path: "/api/config.yaml".to_string(),
+                mount_type: "system_config".to_string(),
+                root_path: "/".to_string(),
+                enabled: true,
+                options: Value::Null,
+            }],
+            auth: AuthConfig::default(),
+            cache: CacheConfig::default(),
+        };
+        let app = build_app(state);
         let response = app
             .clone()
             .oneshot(
@@ -4452,7 +4379,7 @@ cache:
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/atree?list-type=2&delimiter=/")
+                    .uri("/?list-type=2&delimiter=/")
                     .header(header::ACCEPT, "application/xml")
                     .body(Body::empty())
                     .unwrap(),

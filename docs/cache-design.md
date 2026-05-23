@@ -179,17 +179,16 @@ Completed:
 - SQLite-backed runtime config.
 - tmp-backed local directory for multipart upload parts.
 - S3 multipart upload compatibility by assembling local parts before uploading one final object to Quark.
+- Quark GET/HEAD object read cache with TTL and size cleanup.
+- GitHub release metadata cache, so repeated directory listings and file metadata checks do not hit the GitHub API every time.
+- Cache invalidation for normal PUT/DELETE, multipart complete, and config PUT.
 
 Planned cache work:
 
-1. Add SQLite metadata using `rusqlite`.
-2. Add local cache directories and temp-file helpers.
-3. Change `PUT` to write request body to temp file first, then upload that file to Quark, then promote it into cache.
-4. Change `GET` to return cached file on hit; on miss, stream from Quark while writing a temp cache file.
-5. Change `HEAD` to use SQLite when possible.
-6. Change `DELETE` to clean both Quark and local cache.
-7. Add a manual refresh command/API to rescan a Quark directory and reconcile SQLite.
-8. Add simple cache-size reporting and later LRU eviction.
+1. Add SQLite metadata for directories and richer object indexes if needed.
+2. Change large-object GET to stream from Quark while writing a temp cache file, instead of buffering the whole object before caching.
+3. Add a manual refresh command/API to rescan a Quark directory and reconcile cached metadata.
+4. Add cache-size reporting and later LRU controls.
 
 ## Later Work
 

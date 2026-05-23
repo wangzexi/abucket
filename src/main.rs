@@ -347,7 +347,7 @@ struct DirectOpenTokenInfo {
     sign_key: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct GithubRelease {
     #[serde(default)]
     created_at: String,
@@ -359,7 +359,7 @@ struct GithubRelease {
     zipball_url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct GithubAsset {
     name: String,
     #[serde(default)]
@@ -1622,6 +1622,7 @@ async fn config_handler(
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
             }
             *state.config.write().await = config.clone();
+            clear_cache_dir(state).await;
             let config_path = state_config_path(state).await;
             match commented_yaml(&config, &public_base_url, &config_path) {
                 Ok(yaml) => yaml_response(StatusCode::OK, yaml),
@@ -1756,7 +1757,7 @@ async fn object_handler(
             return url_object(method, &headers, url, proxy).await;
         }
         ResolvedMount::GithubReleases { rest, config } => {
-            return github_releases_object(method, &headers, rest, config).await;
+            return github_releases_object(&state, method, &headers, rest, config).await;
         }
     };
     if method == Method::POST && params.contains_key("uploads") {
@@ -1884,7 +1885,7 @@ async fn list_objects(
         }
         Some(ResolvedMount::GithubReleases { rest, config }) => {
             if rest.trim_matches('/').is_empty() {
-                return list_github_releases(&config, headers, &bucket, &prefix).await;
+                return list_github_releases(&state, &config, headers, &bucket, &prefix).await;
             }
             return list_xml(
                 &bucket,
@@ -2184,6 +2185,38 @@ async fn invalidate_cached_object(state: &AppState, virtual_path: &str) {
     let _ = tokio::fs::remove_file(&meta_path).await;
 }
 
+async fn clear_cache_dir(state: &AppState) {
+    let _ = tokio::fs::remove_dir_all(&state.cache_dir).await;
+    let _ = tokio::fs::create_dir_all(&state.cache_dir).await;
+}
+
+async fn read_cached_json<T>(state: &AppState, cache_key: &str) -> Option<T>
+where
+    T: DeserializeOwned,
+{
+    let cached = read_cached_object(state, cache_key).await?;
+    serde_json::from_slice(&cached.bytes).ok()
+}
+
+async fn write_cached_json<T>(state: &AppState, cache_key: &str, value: &T)
+where
+    T: Serialize,
+{
+    let Ok(bytes) = serde_json::to_vec(value) else {
+        return;
+    };
+    let cached = CachedObject {
+        meta: CacheMeta {
+            size: bytes.len() as u64,
+            modified: chrono_millis(),
+            fetched_at: chrono_millis(),
+            content_type: Some("application/json".to_string()),
+        },
+        bytes: Bytes::from(bytes),
+    };
+    write_cached_object(state, cache_key, &cached).await;
+}
+
 fn cache_paths(cache_dir: &PathBuf, virtual_path: &str) -> (PathBuf, PathBuf) {
     let key = hex::encode(Sha256::digest(virtual_path.as_bytes()));
     (
@@ -2307,6 +2340,7 @@ async fn url_object(
 }
 
 async fn github_releases_object(
+    state: &AppState,
     method: Method,
     headers: &HeaderMap,
     rest: String,
@@ -2321,9 +2355,9 @@ async fn github_releases_object(
     }
     let rest = rest.trim_matches('/');
     if rest.is_empty() {
-        return list_github_releases(&config, headers, "github_releases", "").await;
+        return list_github_releases(state, &config, headers, "github_releases", "").await;
     }
-    let release = match fetch_github_release(&config).await {
+    let release = match fetch_github_release_cached(state, &config).await {
         Ok(release) => release,
         Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "GithubError", &err.to_string()),
     };
@@ -2401,12 +2435,13 @@ fn github_release_head_response(
 }
 
 async fn list_github_releases(
+    state: &AppState,
     config: &GithubReleasesConfig,
     headers: &HeaderMap,
     bucket: &str,
     prefix: &str,
 ) -> Response {
-    let release = match fetch_github_release(config).await {
+    let release = match fetch_github_release_cached(state, config).await {
         Ok(release) => release,
         Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "GithubError", &err.to_string()),
     };
@@ -2425,6 +2460,31 @@ async fn list_github_releases(
         })
         .collect();
     list_xml_entries(bucket, prefix, Some("/"), entries, Vec::new(), 1000, None)
+}
+
+async fn fetch_github_release_cached(
+    state: &AppState,
+    config: &GithubReleasesConfig,
+) -> Result<GithubRelease> {
+    let cache_key = github_release_cache_key(config);
+    if let Some(release) = read_cached_json::<GithubRelease>(state, &cache_key).await {
+        return Ok(release);
+    }
+    let release = fetch_github_release(config).await?;
+    write_cached_json(state, &cache_key, &release).await;
+    Ok(release)
+}
+
+fn github_release_cache_key(config: &GithubReleasesConfig) -> String {
+    let token_hash = config
+        .token
+        .as_deref()
+        .map(|token| hex::encode(Sha256::digest(token.as_bytes())))
+        .unwrap_or_else(|| "anonymous".to_string());
+    format!(
+        "/.atree/cache/github_releases/{}/{}",
+        config.repo, token_hash
+    )
 }
 
 async fn fetch_github_release(config: &GithubReleasesConfig) -> Result<GithubRelease> {
@@ -2733,6 +2793,7 @@ async fn complete_multipart_upload(
     {
         Ok(()) => {
             let bucket = state_bucket(state).await;
+            invalidate_cached_object(state, &format!("/{}", key.trim_matches('/'))).await;
             let _ = std::fs::remove_dir_all(&dir);
             xml_response(
                 StatusCode::OK,

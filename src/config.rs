@@ -278,9 +278,9 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # auth.rules[].resources: service paths such as /public/* or /*.
 # requests that match no rule are denied unless the caller is `root`.
 #
-# cache.enabled: enable local read cache for Quark-backed GET/HEAD object reads.
-# cache.ttl_seconds: cached object freshness window. Default: 600.
-# cache.max_bytes: max local cache size in bytes; it is not Quark capacity.
+# cache.enabled: enable local read cache for Quark GET/HEAD objects and GitHub release metadata.
+# cache.ttl_seconds: cached freshness window. Default: 600.
+# cache.max_bytes: max local cache size in bytes; it is not backend capacity.
 #
 # `atree` is an S3-style file API with one mounted system config file.
 #

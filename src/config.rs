@@ -306,7 +306,7 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
         validate_abs_path(&mount.mount_path, "mount_path")?;
         if !matches!(
             mount.mount_type.as_str(),
-            "quark_open" | "system_config" | "url_tree" | "github_releases" | "s3" | "minio"
+            "quark_open" | "system_config" | "url_tree" | "github_releases" | "s3"
         ) {
             bail!("unsupported mount type '{}'", mount.mount_type);
         }
@@ -391,7 +391,7 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                     bail!("system_config mount_path must be a file path, not /");
                 }
             }
-            "s3" | "minio" => {
+            "s3" => {
                 if let Some(root_path) = mount.root_path.as_deref() {
                     validate_abs_path(root_path, "root_path")?;
                 }

@@ -140,7 +140,7 @@ pub(crate) fn resolve_mount(
                 config: github_releases_config_from_mount(mount)?,
             })
         }
-        "s3" | "minio" => {
+        "s3" => {
             let rest = strip_mount_path(&mount.mount_path, &path);
             Some(ResolvedMount::S3 {
                 remote_key: join_remote_path(config::mount_root_path(mount), rest),

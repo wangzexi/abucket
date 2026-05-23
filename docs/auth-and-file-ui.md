@@ -304,7 +304,7 @@ Fields:
 - To disable a mount, comment it out of the YAML.
 - `options`: mount-specific settings, such as an outbound proxy for `url_tree` or `github_releases`
 
-`mount_path` is the mount's unique identifier. A separate `name` field is not needed in the first version.
+`mount_path` is usually unique. Multiple `github_releases` mounts may share one `mount_path`; their latest release assets are merged into a single flat directory. A separate `name` field is not needed in the first version.
 
 `root_path` is a human-readable string. Normal configs should not need internal IDs such as Quark `fid`. Driver-specific internal IDs should usually be resolved at runtime and cached in SQLite.
 
@@ -345,7 +345,7 @@ Example GitHub releases mount:
 
 ```yaml
 mounts:
-  - mount_path: /hiddify
+  - mount_path: /client
     type: github_releases
     root_path: hiddify/hiddify-app
     options:
@@ -356,16 +356,24 @@ mounts:
         - Hiddify-Android-universal.apk
         - Hiddify-MacOS.dmg
         - Hiddify-Windows-Portable-x64.zip
+  - mount_path: /client
+    type: github_releases
+    root_path: SagerNet/sing-box
+    options:
+      proxy: http://127.0.0.1:1080
+      asset_allow:
+        - sing-box-*-linux-amd64.tar.gz
+        - sing-box-*-darwin-arm64.tar.gz
 auth:
   rules:
     - principal: anonymous
       actions: [ListBucket, HeadObject, GetObject]
-      resources: [/hiddify, /hiddify/*]
+      resources: [/client, /client/*]
 ```
 
 `/github/sing-box/file.tar.gz` maps to `https://github.com/SagerNet/sing-box/releases/download/v1.12.0/file.tar.gz`. The proxy option belongs to this mount only; other mounts can stay direct.
 
-`/hiddify/*` matches descendants at any depth, but not `/hiddify` itself. Listable directories should be granted explicitly.
+For `github_releases`, sharing `mount_path` creates one flat release asset directory, so `/client/` can contain both Hiddify and sing-box assets. `/client/*` matches descendants at any depth, but not `/client` itself. Listable directories should be granted explicitly.
 
 The routing rule should be:
 

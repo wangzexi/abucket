@@ -14,8 +14,9 @@ mod ui;
 #[cfg(test)]
 use crate::mounts::resolve_remote_key;
 use crate::mounts::{
-    GithubReleasesConfig, QuarkOpenConfig, ResolvedMount, backend_from_mount, github_client,
-    is_fnnas_quark_refresh_url, persist_quark_open_config, quark_open_client, resolve_mount,
+    GithubReleasesConfig, QuarkOpenConfig, ResolvedMount, S3Config, backend_from_mount,
+    github_client, is_fnnas_quark_refresh_url, persist_quark_open_config, quark_open_client,
+    resolve_github_release_mounts, resolve_mount,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
@@ -284,6 +285,21 @@ struct S3Entry {
     key: String,
     size: i64,
     modified: i64,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct S3Object {
+    key: String,
+    size: i64,
+    modified: i64,
+    content_type: Option<String>,
+}
+
+struct S3List {
+    objects: Vec<S3Object>,
+    common_prefixes: Vec<String>,
+    next_offset: Option<String>,
 }
 
 impl QuarkBackend {
@@ -1196,6 +1212,22 @@ async fn object_handler(
     if !is_authorized(&state, &headers, action, &virtual_path).await {
         return access_denied_response(&state, &headers, &bucket).await;
     }
+    let github_release_mounts = if matches!(method, Method::GET | Method::HEAD) {
+        resolve_github_release_mounts(&config, &virtual_path)
+    } else {
+        Vec::new()
+    };
+    if github_release_mounts.len() > 1 {
+        drop(config);
+        return github_releases_object_any(
+            &state,
+            method,
+            &headers,
+            &virtual_path,
+            github_release_mounts,
+        )
+        .await;
+    }
     let mount = match resolved_mount {
         Some(mount) => mount,
         None => return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "mount not found"),
@@ -1218,7 +1250,20 @@ async fn object_handler(
             return url_object(method, &headers, url, proxy).await;
         }
         ResolvedMount::GithubReleases { rest, config } => {
-            return github_releases_object(&state, method, &headers, rest, config).await;
+            return github_releases_object(&state, method, &headers, &virtual_path, rest, config)
+                .await;
+        }
+        ResolvedMount::S3 { remote_key, config } => {
+            return s3_object(
+                &state,
+                method,
+                &headers,
+                body,
+                &virtual_path,
+                remote_key,
+                config,
+            )
+            .await;
         }
     };
     if method == Method::POST && params.contains_key("uploads") {
@@ -1334,6 +1379,28 @@ async fn list_objects(
     }
 
     let config = state.config.read().await;
+    let github_release_mounts = resolve_github_release_mounts(&config, &virtual_prefix);
+    if !github_release_mounts.is_empty()
+        && github_release_mounts
+            .iter()
+            .all(|(rest, _)| rest.trim_matches('/').is_empty())
+    {
+        drop(config);
+        return list_github_releases_many(
+            &state,
+            Some(&list_cache_key),
+            github_release_mounts
+                .into_iter()
+                .map(|(_, config)| config)
+                .collect(),
+            &bucket,
+            &prefix,
+            delimiter.as_deref(),
+            max_keys,
+            offset,
+        )
+        .await;
+    }
     let (remote_dir, backend) = match resolve_mount(&config, &virtual_prefix) {
         Some(ResolvedMount::QuarkOpen { remote_key, config }) => {
             let quark = match quark_open_client(config) {
@@ -1366,6 +1433,21 @@ async fn list_objects(
                 None,
                 Vec::new(),
                 Vec::new(),
+            )
+            .await;
+        }
+        Some(ResolvedMount::S3 { remote_key, config }) => {
+            return list_s3_mount(
+                &state,
+                &list_cache_key,
+                &bucket,
+                &prefix,
+                delimiter.as_deref(),
+                max_keys,
+                offset,
+                &virtual_prefix,
+                remote_key,
+                config,
             )
             .await;
         }
@@ -1469,6 +1551,109 @@ async fn list_objects(
     );
     cache_list_xml(&state, &list_cache_key, &xml).await;
     xml_response(StatusCode::OK, xml)
+}
+
+async fn list_s3_mount(
+    state: &AppState,
+    list_cache_key: &str,
+    bucket: &str,
+    prefix: &str,
+    delimiter: Option<&str>,
+    max_keys: usize,
+    offset: usize,
+    virtual_prefix: &str,
+    remote_prefix: String,
+    config: S3Config,
+) -> Response {
+    let remote_delimiter = delimiter.filter(|value| *value == "/");
+    let listing =
+        match s3_list_objects(&config, &remote_prefix, remote_delimiter, max_keys, offset).await {
+            Ok(listing) => listing,
+            Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "S3Error", &err.to_string()),
+        };
+    let base_virtual = virtual_prefix.trim_matches('/');
+    let base_remote = remote_prefix.trim_matches('/');
+    let entries = listing
+        .objects
+        .into_iter()
+        .map(|object| S3Entry {
+            key: join_s3_tree_path(base_virtual, strip_s3_prefix(base_remote, &object.key)),
+            size: object.size,
+            modified: object.modified,
+        })
+        .collect::<Vec<_>>();
+    let common_prefixes = listing
+        .common_prefixes
+        .into_iter()
+        .map(|prefix| {
+            let key = join_s3_tree_path(base_virtual, strip_s3_prefix(base_remote, &prefix));
+            if key.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", key.trim_end_matches('/'))
+            }
+        })
+        .filter(|prefix| !prefix.is_empty())
+        .collect::<Vec<_>>();
+    let xml = list_xml_string(
+        bucket,
+        prefix,
+        delimiter,
+        entries,
+        common_prefixes,
+        max_keys,
+        listing.next_offset.as_deref(),
+    );
+    cache_list_xml(state, list_cache_key, &xml).await;
+    xml_response(StatusCode::OK, xml)
+}
+
+async fn s3_list_objects(
+    _config: &S3Config,
+    _prefix: &str,
+    _delimiter: Option<&str>,
+    _max_keys: usize,
+    _offset: usize,
+) -> Result<S3List> {
+    bail!("s3 mounts are not implemented yet")
+}
+
+async fn s3_object(
+    _state: &AppState,
+    _method: Method,
+    _headers: &HeaderMap,
+    _body: Bytes,
+    _virtual_path: &str,
+    _remote_key: String,
+    _config: S3Config,
+) -> Response {
+    s3_error(
+        StatusCode::NOT_IMPLEMENTED,
+        "NotImplemented",
+        "s3 mounts are not implemented yet",
+    )
+}
+
+fn join_s3_tree_path(base: &str, rest: &str) -> String {
+    let base = base.trim_matches('/');
+    let rest = rest.trim_matches('/');
+    match (base.is_empty(), rest.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => rest.to_string(),
+        (false, true) => base.to_string(),
+        (false, false) => format!("{base}/{rest}"),
+    }
+}
+
+fn strip_s3_prefix<'a>(base: &str, key: &'a str) -> &'a str {
+    let base = base.trim_matches('/');
+    if base.is_empty() {
+        return key.trim_start_matches('/');
+    }
+    key.trim_start_matches('/')
+        .strip_prefix(base)
+        .unwrap_or(key)
+        .trim_start_matches('/')
 }
 
 async fn list_files_for_s3(
@@ -1841,24 +2026,9 @@ async fn url_object(
             "url_tree mounts are read-only",
         );
     }
-    let mut builder = Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .timeout(Duration::from_secs(120));
-    if let Some(proxy_url) = proxy {
-        match Proxy::all(&proxy_url) {
-            Ok(proxy) => builder = builder.proxy(proxy),
-            Err(err) => return s3_error(StatusCode::BAD_REQUEST, "InvalidProxy", &err.to_string()),
-        }
-    }
-    let client = match builder.build() {
+    let client = match http_client_with_proxy(proxy.as_deref()) {
         Ok(client) => client,
-        Err(err) => {
-            return s3_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "ProxyError",
-                &err.to_string(),
-            );
-        }
+        Err(err) => return s3_error(StatusCode::BAD_REQUEST, "InvalidProxy", &err.to_string()),
     };
     let mut req = match method {
         Method::GET => client.get(&url),
@@ -1899,10 +2069,21 @@ async fn url_object(
     resp
 }
 
+fn http_client_with_proxy(proxy: Option<&str>) -> Result<Client> {
+    let mut builder = Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(120));
+    if let Some(proxy_url) = proxy {
+        builder = builder.proxy(Proxy::all(proxy_url)?);
+    }
+    Ok(builder.build()?)
+}
+
 async fn github_releases_object(
     state: &AppState,
     method: Method,
     headers: &HeaderMap,
+    virtual_path: &str,
     rest: String,
     config: GithubReleasesConfig,
 ) -> Response {
@@ -1916,6 +2097,19 @@ async fn github_releases_object(
     let rest = rest.trim_matches('/');
     if rest.is_empty() {
         return list_github_releases(state, None, &config, headers, "github_releases", "").await;
+    }
+    if method == Method::GET
+        && !headers.contains_key(header::RANGE)
+        && let Some(cached) = read_cached_object(state, virtual_path).await
+    {
+        return cached_object_response(cached, headers, false)
+            .unwrap_or_else(|err| s3_error_for(&err));
+    }
+    if method == Method::HEAD
+        && let Some(cached) = read_cached_object(state, virtual_path).await
+    {
+        return cached_object_response(cached, headers, true)
+            .unwrap_or_else(|err| s3_error_for(&err));
     }
     let release = match fetch_github_release_cached(state, &config).await {
         Ok(release) => release,
@@ -1931,6 +2125,19 @@ async fn github_releases_object(
             Ok(response) => response,
             Err(err) => s3_error_for(&err),
         };
+    }
+    if !headers.contains_key(header::RANGE) {
+        return github_release_get_cached(
+            state,
+            headers,
+            virtual_path,
+            &url,
+            config.proxy.as_deref(),
+            size,
+            modified,
+            content_type.as_deref(),
+        )
+        .await;
     }
     let mut response = url_object(method, headers, url, config.proxy.clone()).await;
     if response.status().is_success() {
@@ -1949,6 +2156,92 @@ async fn github_releases_object(
         }
     }
     response
+}
+
+async fn github_releases_object_any(
+    state: &AppState,
+    method: Method,
+    headers: &HeaderMap,
+    virtual_path: &str,
+    mounts: Vec<(String, GithubReleasesConfig)>,
+) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return s3_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "MethodNotAllowed",
+            "github_releases mounts are read-only",
+        );
+    }
+    let Some((rest, _)) = mounts.first() else {
+        return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "object not found");
+    };
+    if rest.trim_matches('/').is_empty() {
+        return list_github_releases_many(
+            state,
+            None,
+            mounts.into_iter().map(|(_, config)| config).collect(),
+            "github_releases",
+            "",
+            Some("/"),
+            1000,
+            0,
+        )
+        .await;
+    }
+    for (rest, config) in mounts.into_iter().rev() {
+        let release = match fetch_github_release_cached(state, &config).await {
+            Ok(release) => release,
+            Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "GithubError", &err.to_string()),
+        };
+        if github_release_file(&release, &config, rest.trim_matches('/')).is_some() {
+            return github_releases_object(state, method, headers, virtual_path, rest, config)
+                .await;
+        }
+    }
+    s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "object not found")
+}
+
+async fn github_release_get_cached(
+    state: &AppState,
+    headers: &HeaderMap,
+    virtual_path: &str,
+    url: &str,
+    proxy: Option<&str>,
+    size: i64,
+    modified: i64,
+    content_type: Option<&str>,
+) -> Response {
+    let client = match http_client_with_proxy(proxy) {
+        Ok(client) => client,
+        Err(err) => return s3_error(StatusCode::BAD_REQUEST, "InvalidConfig", &err.to_string()),
+    };
+    let response = match client.get(url).send().await {
+        Ok(response) => response,
+        Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "DownloadError", &err.to_string()),
+    };
+    let status = response.status();
+    if !status.is_success() {
+        return s3_error(
+            StatusCode::BAD_GATEWAY,
+            "DownloadError",
+            &format!("download returned {status}"),
+        );
+    }
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "DownloadError", &err.to_string()),
+    };
+    let cached = CachedObject {
+        meta: CacheMeta {
+            size: size.max(bytes.len() as i64) as u64,
+            modified,
+            fetched_at: chrono_millis(),
+            content_type: content_type.map(ToString::to_string),
+        },
+        bytes,
+    };
+    write_cached_object(state, virtual_path, &cached).await;
+    cached_object_response(cached, headers, false).unwrap_or_else(|err| s3_error_for(&err))
 }
 
 fn github_release_head_response(
@@ -2021,6 +2314,61 @@ async fn list_github_releases(
         })
         .collect();
     let xml = list_xml_string(bucket, prefix, Some("/"), entries, Vec::new(), 1000, None);
+    if let Some(cache_key) = list_cache_key {
+        cache_list_xml(state, cache_key, &xml).await;
+    }
+    xml_response(StatusCode::OK, xml)
+}
+
+async fn list_github_releases_many(
+    state: &AppState,
+    list_cache_key: Option<&str>,
+    configs: Vec<GithubReleasesConfig>,
+    bucket: &str,
+    prefix: &str,
+    delimiter: Option<&str>,
+    max_keys: usize,
+    offset: usize,
+) -> Response {
+    let mut by_name = HashMap::<String, S3Entry>::new();
+    for config in &configs {
+        let release = match fetch_github_release_cached(state, config).await {
+            Ok(release) => release,
+            Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "GithubError", &err.to_string()),
+        };
+        for entry in github_release_entries(&release, config) {
+            by_name.insert(entry.key.clone(), entry);
+        }
+    }
+    let key_prefix = prefix.trim_matches('/');
+    let mut entries = by_name.into_values().collect::<Vec<_>>();
+    entries.sort_by(|a, b| a.key.cmp(&b.key));
+    let total = entries.len();
+    let next_token = if offset + max_keys < total {
+        Some((offset + max_keys).to_string())
+    } else {
+        None
+    };
+    let entries = entries
+        .into_iter()
+        .skip(offset)
+        .take(max_keys)
+        .map(|mut entry| {
+            if !key_prefix.is_empty() {
+                entry.key = format!("{key_prefix}/{}", entry.key);
+            }
+            entry
+        })
+        .collect();
+    let xml = list_xml_string(
+        bucket,
+        prefix,
+        delimiter,
+        entries,
+        Vec::new(),
+        max_keys,
+        next_token.as_deref(),
+    );
     if let Some(cache_key) = list_cache_key {
         cache_list_xml(state, cache_key, &xml).await;
     }
@@ -3252,6 +3600,37 @@ cache:
         assert!(config.show_source_code);
         assert!(asset_allowed("Hiddify-MacOS.dmg", &config.asset_allow));
         assert!(!asset_allowed("Hiddify-Android.apk", &config.asset_allow));
+    }
+
+    #[test]
+    fn duplicate_github_release_mounts_can_form_flat_directory() {
+        let config = config_with_mounts(vec![
+            MountConfig {
+                mount_path: "/client".to_string(),
+                mount_type: "github_releases".to_string(),
+                root_path: Some("hiddify/hiddify-app".to_string()),
+                options: json!({"asset_allow": ["Hiddify-MacOS.dmg"]}),
+            },
+            MountConfig {
+                mount_path: "/client".to_string(),
+                mount_type: "github_releases".to_string(),
+                root_path: Some("SagerNet/sing-box".to_string()),
+                options: json!({"asset_allow": ["sing-box-*-linux-amd64.tar.gz"]}),
+            },
+            MountConfig {
+                mount_path: "/api/config.yaml".to_string(),
+                mount_type: "system_config".to_string(),
+                root_path: None,
+                options: Value::Null,
+            },
+        ]);
+
+        validate_config(&config).unwrap();
+        let mounts = resolve_github_release_mounts(&config, "/client/Hiddify-MacOS.dmg");
+        assert_eq!(mounts.len(), 2);
+        assert!(mounts.iter().all(|(rest, _)| rest == "Hiddify-MacOS.dmg"));
+        assert_eq!(mounts[0].1.repo, "hiddify/hiddify-app");
+        assert_eq!(mounts[1].1.repo, "SagerNet/sing-box");
     }
 
     #[test]

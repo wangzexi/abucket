@@ -28,6 +28,19 @@ pub(crate) struct GithubReleasesConfig {
     pub(crate) asset_allow: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct S3Config {
+    pub(crate) endpoint: String,
+    pub(crate) bucket: String,
+    pub(crate) region: String,
+    pub(crate) access_key: String,
+    pub(crate) secret_key: String,
+    pub(crate) session_token: Option<String>,
+    pub(crate) path_style: bool,
+    pub(crate) proxy: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ResolvedMount {
     QuarkOpen {
@@ -44,6 +57,10 @@ pub(crate) enum ResolvedMount {
     GithubReleases {
         rest: String,
         config: GithubReleasesConfig,
+    },
+    S3 {
+        remote_key: String,
+        config: S3Config,
     },
 }
 
@@ -123,8 +140,46 @@ pub(crate) fn resolve_mount(
                 config: github_releases_config_from_mount(mount)?,
             })
         }
+        "s3" | "minio" => {
+            let rest = strip_mount_path(&mount.mount_path, &path);
+            Some(ResolvedMount::S3 {
+                remote_key: join_remote_path(config::mount_root_path(mount), rest),
+                config: s3_config_from_mount(mount)?,
+            })
+        }
         _ => None,
     }
+}
+
+pub(crate) fn resolve_github_release_mounts(
+    config: &config::ServiceConfig,
+    virtual_path: &str,
+) -> Vec<(String, GithubReleasesConfig)> {
+    let path = normalize_virtual_path(virtual_path);
+    let matches = config
+        .mounts
+        .iter()
+        .filter(|mount| {
+            mount.mount_type == "github_releases" && mount_matches(&mount.mount_path, &path)
+        })
+        .collect::<Vec<_>>();
+    let Some(best_len) = matches
+        .iter()
+        .map(|mount| normalize_virtual_path(&mount.mount_path).len())
+        .max()
+    else {
+        return Vec::new();
+    };
+    matches
+        .into_iter()
+        .filter(|mount| normalize_virtual_path(&mount.mount_path).len() == best_len)
+        .filter_map(|mount| {
+            Some((
+                strip_mount_path(&mount.mount_path, &path).to_string(),
+                github_releases_config_from_mount(mount)?,
+            ))
+        })
+        .collect()
 }
 
 pub(crate) fn backend_from_mount(mount: ResolvedMount) -> Option<(String, QuarkBackend)> {
@@ -188,6 +243,33 @@ fn github_releases_config_from_mount(mount: &config::MountConfig) -> Option<Gith
         proxy: mount_option_string(&mount.options, "proxy"),
         show_source_code: mount_option_bool(&mount.options, "show_source_code"),
         asset_allow: mount_option_string_list(&mount.options, "asset_allow"),
+    })
+}
+
+fn s3_config_from_mount(mount: &config::MountConfig) -> Option<S3Config> {
+    Some(S3Config {
+        endpoint: mount_option_string(&mount.options, "endpoint")?,
+        bucket: mount_option_string(&mount.options, "bucket")?,
+        region: mount_option_string(&mount.options, "region")
+            .unwrap_or_else(|| "us-east-1".to_string()),
+        access_key: mount_option_string(&mount.options, "access_key")
+            .or_else(|| mount_option_string(&mount.options, "access_key_id"))?,
+        secret_key: mount_option_string(&mount.options, "secret_key")
+            .or_else(|| mount_option_string(&mount.options, "secret_access_key"))?,
+        session_token: mount_option_string(&mount.options, "session_token"),
+        path_style: mount
+            .options
+            .get("path_style")
+            .or_else(|| mount.options.get("force_path_style"))
+            .and_then(|value| {
+                value.as_bool().or_else(|| {
+                    value
+                        .as_str()
+                        .map(|value| matches!(value, "true" | "yes" | "1"))
+                })
+            })
+            .unwrap_or(true),
+        proxy: mount_option_string(&mount.options, "proxy"),
     })
 }
 

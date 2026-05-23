@@ -117,7 +117,7 @@ auth:
 
 ```yaml
 mounts:
-  - mount_path: /hiddify
+  - mount_path: /client
     type: github_releases
     root_path: hiddify/hiddify-app
     options:
@@ -128,14 +128,22 @@ mounts:
         - Hiddify-Android-universal.apk
         - Hiddify-MacOS.dmg
         - Hiddify-Windows-Portable-x64.zip
+  - mount_path: /client
+    type: github_releases
+    root_path: SagerNet/sing-box
+    options:
+      proxy: http://127.0.0.1:1080
+      asset_allow:
+        - sing-box-*-linux-amd64.tar.gz
+        - sing-box-*-darwin-arm64.tar.gz
 auth:
   rules:
     - principal: anonymous
       actions: [ListBucket, HeadObject, GetObject]
-      resources: [/hiddify, /hiddify/*]
+      resources: [/client, /client/*]
 ```
 
-`/hiddify/*` matches descendants at any depth, but not `/hiddify` itself. Listable directories should be granted explicitly.
+Multiple `github_releases` mounts may share the same `mount_path`; their latest release assets are merged into one flat directory. `/client/*` matches descendants at any depth, but not `/client` itself. Listable directories should be granted explicitly.
 
 ## 简单测试
 

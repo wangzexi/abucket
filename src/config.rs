@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env,
     path::{Path, PathBuf},
 };
@@ -252,6 +252,7 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 #   github_releases.token: optional GitHub token for higher rate limits or private repos.
 #   github_releases.asset_allow: optional list of asset names or * globs.
 #   github_releases.show_source_code: optional boolean. Exposes GitHub's source zip/tarball links.
+#   Multiple github_releases mounts can share one mount_path to create a flat merged directory.
 #   use {{}} or null when unused.
 # system_config note:
 #   mount_path is one mounted file path, not a directory. Example: {config_path}
@@ -296,7 +297,7 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
     if config.cache.ttl_seconds == 0 {
         bail!("cache.ttl_seconds must be greater than 0");
     }
-    let mut mount_paths = HashSet::new();
+    let mut mount_paths = HashMap::new();
     let mut has_system_config = false;
     for mount in &config.mounts {
         validate_abs_path(&mount.mount_path, "mount_path")?;
@@ -392,7 +393,10 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
         if mount.mount_type == "system_config" {
             has_system_config = true;
         }
-        if !mount_paths.insert(mount.mount_path.clone()) {
+        if let Some(existing_type) =
+            mount_paths.insert(mount.mount_path.clone(), mount.mount_type.clone())
+            && (existing_type != "github_releases" || mount.mount_type != "github_releases")
+        {
             bail!("duplicate mount_path '{}'", mount.mount_path);
         }
     }

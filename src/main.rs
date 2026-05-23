@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     env,
     net::SocketAddr,
     path::PathBuf,
@@ -33,7 +33,7 @@ use config::{
     parse_config_yaml, save_config_to_db,
 };
 use futures_util::TryStreamExt;
-use reqwest::{Client, Proxy};
+use reqwest::{Client, Proxy, Url};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
@@ -1356,6 +1356,10 @@ async fn list_objects(
         .or_else(|| params.get("marker"))
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
+    let s3_continuation_token = params
+        .get("continuation-token")
+        .or_else(|| params.get("marker"))
+        .cloned();
     let dir_path = if delimiter.as_deref() == Some("/") {
         prefix.trim_end_matches('/').to_string()
     } else {
@@ -1436,7 +1440,11 @@ async fn list_objects(
             )
             .await;
         }
-        Some(ResolvedMount::S3 { remote_key, config }) => {
+        Some(ResolvedMount::S3 {
+            remote_key,
+            config: s3_config,
+        }) => {
+            drop(config);
             return list_s3_mount(
                 &state,
                 &list_cache_key,
@@ -1445,13 +1453,30 @@ async fn list_objects(
                 delimiter.as_deref(),
                 max_keys,
                 offset,
+                s3_continuation_token.as_deref(),
                 &virtual_prefix,
                 remote_key,
-                config,
+                s3_config,
             )
             .await;
         }
         None => {
+            let (entries, common_prefixes) =
+                synthetic_mount_listing(&config, &prefix, delimiter.as_deref());
+            if !entries.is_empty() || !common_prefixes.is_empty() {
+                drop(config);
+                let xml = list_xml_string(
+                    &bucket,
+                    &prefix,
+                    delimiter.as_deref(),
+                    entries,
+                    common_prefixes,
+                    max_keys,
+                    None,
+                );
+                cache_list_xml(&state, &list_cache_key, &xml).await;
+                return xml_response(StatusCode::OK, xml);
+            }
             return list_xml_cached(
                 &state,
                 &list_cache_key,
@@ -1553,6 +1578,60 @@ async fn list_objects(
     xml_response(StatusCode::OK, xml)
 }
 
+fn synthetic_mount_listing(
+    config: &ServiceConfig,
+    prefix: &str,
+    delimiter: Option<&str>,
+) -> (Vec<S3Entry>, Vec<String>) {
+    if delimiter != Some("/") {
+        return (Vec::new(), Vec::new());
+    }
+    let current = normalize_browser_virtual_path(prefix.trim_end_matches('/'));
+    let mut entries = Vec::new();
+    let mut common_prefixes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for mount in &config.mounts {
+        if mount.mount_path == "/" {
+            continue;
+        }
+        let normalized = normalize_browser_virtual_path(&mount.mount_path);
+        let rest = if current == "/" {
+            normalized.trim_start_matches('/')
+        } else {
+            let current_prefix = format!("{}/", current.trim_end_matches('/'));
+            let Some(rest) = normalized.strip_prefix(&current_prefix) else {
+                continue;
+            };
+            rest
+        };
+        if rest.is_empty() {
+            continue;
+        }
+        let Some(first) = rest.split('/').next().filter(|part| !part.is_empty()) else {
+            continue;
+        };
+        let key = if current == "/" {
+            first.to_string()
+        } else {
+            format!("{}/{}", current.trim_start_matches('/'), first)
+        };
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let is_file = mount.mount_type == "system_config" && !rest.contains('/');
+        if is_file {
+            entries.push(S3Entry {
+                key,
+                size: 0,
+                modified: chrono_millis(),
+            });
+        } else {
+            common_prefixes.push(format!("{}/", key.trim_end_matches('/')));
+        }
+    }
+    (entries, common_prefixes)
+}
+
 async fn list_s3_mount(
     state: &AppState,
     list_cache_key: &str,
@@ -1560,17 +1639,25 @@ async fn list_s3_mount(
     prefix: &str,
     delimiter: Option<&str>,
     max_keys: usize,
-    offset: usize,
+    _offset: usize,
+    continuation_token: Option<&str>,
     virtual_prefix: &str,
     remote_prefix: String,
     config: S3Config,
 ) -> Response {
     let remote_delimiter = delimiter.filter(|value| *value == "/");
-    let listing =
-        match s3_list_objects(&config, &remote_prefix, remote_delimiter, max_keys, offset).await {
-            Ok(listing) => listing,
-            Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "S3Error", &err.to_string()),
-        };
+    let listing = match s3_list_objects(
+        &config,
+        &remote_prefix,
+        remote_delimiter,
+        max_keys,
+        continuation_token,
+    )
+    .await
+    {
+        Ok(listing) => listing,
+        Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "S3Error", &err.to_string()),
+    };
     let base_virtual = virtual_prefix.trim_matches('/');
     let base_remote = remote_prefix.trim_matches('/');
     let entries = listing
@@ -1609,29 +1696,438 @@ async fn list_s3_mount(
 }
 
 async fn s3_list_objects(
-    _config: &S3Config,
-    _prefix: &str,
-    _delimiter: Option<&str>,
-    _max_keys: usize,
-    _offset: usize,
+    config: &S3Config,
+    prefix: &str,
+    delimiter: Option<&str>,
+    max_keys: usize,
+    continuation_token: Option<&str>,
 ) -> Result<S3List> {
-    bail!("s3 mounts are not implemented yet")
+    let mut query = vec![
+        ("list-type".to_string(), "2".to_string()),
+        ("prefix".to_string(), s3_dir_prefix(prefix, delimiter)),
+        ("max-keys".to_string(), max_keys.to_string()),
+    ];
+    if let Some(delimiter) = delimiter {
+        query.push(("delimiter".to_string(), delimiter.to_string()));
+    }
+    if let Some(token) = continuation_token.filter(|token| !token.is_empty()) {
+        query.push(("continuation-token".to_string(), token.to_string()));
+    }
+    let response = s3_send(
+        config,
+        Method::GET,
+        "",
+        Vec::new(),
+        Bytes::new(),
+        Some(query),
+    )
+    .await?;
+    if !response.status().is_success() {
+        return s3_upstream_error(response).await;
+    }
+    parse_s3_listing(&response.text().await?)
 }
 
 async fn s3_object(
-    _state: &AppState,
-    _method: Method,
-    _headers: &HeaderMap,
-    _body: Bytes,
-    _virtual_path: &str,
-    _remote_key: String,
-    _config: S3Config,
+    state: &AppState,
+    method: Method,
+    headers: &HeaderMap,
+    body: Bytes,
+    virtual_path: &str,
+    remote_key: String,
+    config: S3Config,
 ) -> Response {
-    s3_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "NotImplemented",
-        "s3 mounts are not implemented yet",
-    )
+    let result = match method {
+        Method::GET => s3_get_object(&config, &remote_key, headers).await,
+        Method::HEAD => s3_head_object(&config, &remote_key).await,
+        Method::PUT => {
+            let body = match decode_request_body(headers, body) {
+                Ok(body) => body,
+                Err(err) => return s3_error_for(&err),
+            };
+            let content_type = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    mime_guess::from_path(&remote_key)
+                        .first_or_octet_stream()
+                        .essence_str()
+                        .to_string()
+                });
+            s3_put_object(&config, &remote_key, &content_type, body).await
+        }
+        Method::DELETE => s3_delete_object(&config, &remote_key).await,
+        _ => Ok(s3_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "MethodNotAllowed",
+            "unsupported method",
+        )),
+    };
+    match result {
+        Ok(response) => {
+            if matches!(method, Method::PUT | Method::DELETE) {
+                invalidate_cached_object(state, virtual_path).await;
+                clear_cache_dir(state).await;
+            }
+            response
+        }
+        Err(err) => {
+            warn!("s3 backend request failed: {err:#}");
+            s3_backend_error(&err)
+        }
+    }
+}
+
+async fn s3_head_object(config: &S3Config, key: &str) -> Result<Response> {
+    let response = s3_send(config, Method::HEAD, key, Vec::new(), Bytes::new(), None).await?;
+    s3_passthrough_response(response, true).await
+}
+
+async fn s3_get_object(config: &S3Config, key: &str, headers: &HeaderMap) -> Result<Response> {
+    let mut extra_headers = Vec::new();
+    if let Some(range) = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        extra_headers.push((header::RANGE.as_str().to_string(), range.to_string()));
+    }
+    let response = s3_send(config, Method::GET, key, extra_headers, Bytes::new(), None).await?;
+    s3_passthrough_response(response, false).await
+}
+
+async fn s3_put_object(
+    config: &S3Config,
+    key: &str,
+    content_type: &str,
+    body: Bytes,
+) -> Result<Response> {
+    let etag = format!("\"{:x}\"", md5::compute(&body));
+    let extra_headers = vec![(
+        header::CONTENT_TYPE.as_str().to_string(),
+        content_type.to_string(),
+    )];
+    let response = s3_send(config, Method::PUT, key, extra_headers, body, None).await?;
+    if !response.status().is_success() {
+        return s3_upstream_error(response).await;
+    }
+    Ok((StatusCode::OK, [(header::ETAG, etag)]).into_response())
+}
+
+async fn s3_delete_object(config: &S3Config, key: &str) -> Result<Response> {
+    let response = s3_send(config, Method::DELETE, key, Vec::new(), Bytes::new(), None).await?;
+    if !response.status().is_success() {
+        return s3_upstream_error(response).await;
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn s3_passthrough_response(response: reqwest::Response, head_only: bool) -> Result<Response> {
+    let status = response.status();
+    if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
+        return s3_upstream_error(response).await;
+    }
+    let upstream_headers = response.headers().clone();
+    let mut resp = if head_only {
+        Response::new(Body::empty())
+    } else {
+        Response::new(Body::from_stream(
+            response.bytes_stream().map_err(std::io::Error::other),
+        ))
+    };
+    *resp.status_mut() = status;
+    for name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::CONTENT_RANGE,
+        header::LAST_MODIFIED,
+        header::ETAG,
+        header::CACHE_CONTROL,
+        header::ACCEPT_RANGES,
+        header::CONTENT_DISPOSITION,
+    ] {
+        if let Some(value) = upstream_headers.get(&name) {
+            resp.headers_mut().insert(name, value.clone());
+        }
+    }
+    Ok(resp)
+}
+
+async fn s3_upstream_error<T>(response: reqwest::Response) -> Result<T> {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if status == StatusCode::NOT_FOUND {
+        bail!("object not found");
+    }
+    bail!("s3 backend returned {status}: {body}");
+}
+
+async fn s3_send(
+    config: &S3Config,
+    method: Method,
+    key: &str,
+    extra_headers: Vec<(String, String)>,
+    body: Bytes,
+    query: Option<Vec<(String, String)>>,
+) -> Result<reqwest::Response> {
+    if !config.path_style {
+        bail!("s3 backend currently supports path_style endpoints only");
+    }
+    let client = http_client_with_proxy(config.proxy.as_deref())?;
+    let mut url = Url::parse(config.endpoint.trim_end_matches('/'))?;
+    url.set_path(&s3_path_style_path(&config.bucket, key));
+    if let Some(query) = &query {
+        let mut pairs = url.query_pairs_mut();
+        for (key, value) in query {
+            pairs.append_pair(key, value);
+        }
+    }
+    let body_hash = sha256_hex(&body);
+    let signed = s3_signed_headers(config, &method, &url, &extra_headers, &body_hash)?;
+    let mut req = client.request(method, url).body(body);
+    for (name, value) in extra_headers {
+        req = req.header(name, value);
+    }
+    for (name, value) in signed {
+        req = req.header(name, value);
+    }
+    Ok(req.send().await?)
+}
+
+fn s3_signed_headers(
+    config: &S3Config,
+    method: &Method,
+    url: &Url,
+    extra_headers: &[(String, String)],
+    body_hash: &str,
+) -> Result<Vec<(String, String)>> {
+    let now = chrono::Utc::now();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date = now.format("%Y%m%d").to_string();
+    let host = url
+        .host_str()
+        .map(|host| {
+            if let Some(port) = url.port() {
+                format!("{host}:{port}")
+            } else {
+                host.to_string()
+            }
+        })
+        .ok_or_else(|| anyhow!("s3 endpoint needs a host"))?;
+    let mut headers = BTreeMap::new();
+    headers.insert("host".to_string(), host);
+    headers.insert("x-amz-content-sha256".to_string(), body_hash.to_string());
+    headers.insert("x-amz-date".to_string(), amz_date.clone());
+    if let Some(token) = config.session_token.as_deref() {
+        headers.insert("x-amz-security-token".to_string(), token.to_string());
+    }
+    for (name, value) in extra_headers {
+        headers.insert(name.to_ascii_lowercase(), value.trim().to_string());
+    }
+    let signed_headers = headers.keys().cloned().collect::<Vec<_>>().join(";");
+    let canonical_headers = headers
+        .iter()
+        .map(|(name, value)| format!("{name}:{}\n", value.trim()))
+        .collect::<String>();
+    let canonical_request = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        method.as_str(),
+        s3_canonical_uri(url.path()),
+        s3_canonical_query(url),
+        canonical_headers,
+        signed_headers,
+        body_hash,
+    );
+    let scope = format!("{date}/{}/s3/aws4_request", config.region);
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+        amz_date,
+        scope,
+        sha256_hex(canonical_request.as_bytes())
+    );
+    let signing_key = s3_signing_key(&config.secret_key, &date, &config.region);
+    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+    let mut out = vec![
+        ("x-amz-content-sha256".to_string(), body_hash.to_string()),
+        ("x-amz-date".to_string(), amz_date),
+        (
+            header::AUTHORIZATION.as_str().to_string(),
+            format!(
+                "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+                config.access_key, scope, signed_headers, signature
+            ),
+        ),
+    ];
+    if let Some(token) = config.session_token.as_deref() {
+        out.push(("x-amz-security-token".to_string(), token.to_string()));
+    }
+    Ok(out)
+}
+
+fn parse_s3_listing(xml: &str) -> Result<S3List> {
+    let objects = xml_blocks(xml, "Contents")
+        .into_iter()
+        .filter_map(|block| {
+            let key = xml_tag_text(block, "Key")?;
+            let size = xml_tag_text(block, "Size")
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(0);
+            let modified = xml_tag_text(block, "LastModified")
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+                .map(|value| value.timestamp_millis())
+                .unwrap_or_else(chrono_millis);
+            Some(S3Object {
+                key,
+                size,
+                modified,
+                content_type: None,
+            })
+        })
+        .collect();
+    let common_prefixes = xml_blocks(xml, "CommonPrefixes")
+        .into_iter()
+        .filter_map(|block| xml_tag_text(block, "Prefix"))
+        .collect();
+    let next_offset =
+        xml_tag_text(xml, "NextContinuationToken").or_else(|| xml_tag_text(xml, "NextMarker"));
+    Ok(S3List {
+        objects,
+        common_prefixes,
+        next_offset,
+    })
+}
+
+fn xml_blocks<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut rest = xml;
+    let mut blocks = Vec::new();
+    while let Some(start) = rest.find(&open) {
+        let after_open = &rest[start + open.len()..];
+        let Some(end) = after_open.find(&close) else {
+            break;
+        };
+        blocks.push(&after_open[..end]);
+        rest = &after_open[end + close.len()..];
+    }
+    blocks
+}
+
+fn xml_tag_text(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml_unescape(&xml[start..end]))
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+fn s3_backend_error(err: &anyhow::Error) -> Response {
+    let message = err.to_string();
+    if message.contains("object not found") {
+        s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "object not found")
+    } else {
+        s3_error(StatusCode::BAD_GATEWAY, "S3Error", &message)
+    }
+}
+
+fn s3_dir_prefix(prefix: &str, delimiter: Option<&str>) -> String {
+    let prefix = prefix.trim_matches('/');
+    if delimiter == Some("/") && !prefix.is_empty() {
+        format!("{prefix}/")
+    } else {
+        prefix.to_string()
+    }
+}
+
+fn s3_path_style_path(bucket: &str, key: &str) -> String {
+    let mut path = format!("/{bucket}");
+    for segment in key
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+    {
+        path.push('/');
+        path.push_str(segment);
+    }
+    path
+}
+
+fn s3_canonical_uri(path: &str) -> String {
+    if path.is_empty() {
+        return "/".to_string();
+    }
+    path.to_string()
+}
+
+fn s3_canonical_query(url: &Url) -> String {
+    let mut pairs = url.query_pairs().into_owned().collect::<Vec<_>>();
+    pairs.sort();
+    pairs
+        .into_iter()
+        .map(|(key, value)| format!("{}={}", s3_encode_query(&key), s3_encode_query(&value)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn s3_encode_path_segment(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+fn s3_encode_query(value: &str) -> String {
+    s3_encode_path_segment(value)
+}
+
+fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
+    hex::encode(Sha256::digest(bytes.as_ref()))
+}
+
+fn s3_signing_key(secret_key: &str, date: &str, region: &str) -> Vec<u8> {
+    let date_key = hmac_sha256(format!("AWS4{secret_key}").as_bytes(), date.as_bytes());
+    let date_region_key = hmac_sha256(&date_key, region.as_bytes());
+    let date_region_service_key = hmac_sha256(&date_region_key, b"s3");
+    hmac_sha256(&date_region_service_key, b"aws4_request")
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
+    const BLOCK_SIZE: usize = 64;
+    let mut key_block = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let digest = Sha256::digest(key);
+        key_block[..digest.len()].copy_from_slice(&digest);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut outer = [0x5cu8; BLOCK_SIZE];
+    let mut inner = [0x36u8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        outer[i] ^= key_block[i];
+        inner[i] ^= key_block[i];
+    }
+    let mut inner_hasher = Sha256::new();
+    inner_hasher.update(inner);
+    inner_hasher.update(message);
+    let inner_hash = inner_hasher.finalize();
+    let mut outer_hasher = Sha256::new();
+    outer_hasher.update(outer);
+    outer_hasher.update(inner_hash);
+    outer_hasher.finalize().to_vec()
 }
 
 fn join_s3_tree_path(base: &str, rest: &str) -> String {
@@ -4460,6 +4956,59 @@ cache:
                 .await
                 .contains("<Code>AccessDenied</Code>")
         );
+    }
+
+    #[tokio::test]
+    async fn s3_root_list_includes_synthetic_mount_directories() {
+        let state = test_state();
+        *state.config.write().await = ServiceConfig {
+            s3_bucket: "atree".to_string(),
+            mounts: vec![
+                MountConfig {
+                    mount_path: "/api/config.yaml".to_string(),
+                    mount_type: "system_config".to_string(),
+                    root_path: None,
+                    options: Value::Null,
+                },
+                MountConfig {
+                    mount_path: "/client".to_string(),
+                    mount_type: "github_releases".to_string(),
+                    root_path: Some("hiddify/hiddify-app".to_string()),
+                    options: json!({"asset_allow": ["Hiddify-MacOS.dmg"]}),
+                },
+                MountConfig {
+                    mount_path: "/client".to_string(),
+                    mount_type: "github_releases".to_string(),
+                    root_path: Some("SagerNet/sing-box".to_string()),
+                    options: json!({"asset_allow": ["sing-box-*-linux-amd64.tar.gz"]}),
+                },
+            ],
+            auth: AuthConfig {
+                keys: Vec::new(),
+                rules: vec![AuthRule {
+                    principal: "anonymous".to_string(),
+                    actions: vec!["ListBucket".to_string()],
+                    resources: vec!["/".to_string()],
+                }],
+            },
+            cache: CacheConfig::default(),
+        };
+        let app = build_app(state.app_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/?list-type=2&delimiter=/")
+                    .header(header::ACCEPT, "application/xml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("<Prefix>client/</Prefix>"));
+        assert!(body.contains("<Prefix>api/</Prefix>"));
+        assert_eq!(body.matches("<Prefix>client/</Prefix>").count(), 1);
     }
 
     #[tokio::test]

@@ -236,7 +236,7 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # s3_bucket: path-style S3 bucket name used by clients. Default: atree.
 # mounts: ordered mount table. Later mounts have higher priority.
 # mounts[].mount_path: service path, must start with /. Example: /quark or /pub
-# mounts[].type: quark_open, system_config, url_tree, or github_releases.
+# mounts[].type: quark_open, system_config, url_tree, github_releases, or s3.
 # mounts[].root_path: only for mounts backed by a remote tree.
 #   quark_open: human-readable Quark path to expose at mount_path.
 #   url_tree: upstream http(s) URL prefix. Read-only.
@@ -253,6 +253,9 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 #   github_releases.asset_allow: optional list of asset names or * globs.
 #   github_releases.show_source_code: optional boolean. Exposes GitHub's source zip/tarball links.
 #   Multiple github_releases mounts can share one mount_path to create a flat merged directory.
+#   s3.endpoint/bucket/access_key/secret_key: required for S3-compatible mounts.
+#   s3.region: optional, default us-east-1. s3.path_style: optional, default true.
+#   s3.proxy: optional outbound proxy URL.
 #   use {{}} or null when unused.
 # system_config note:
 #   mount_path is one mounted file path, not a directory. Example: {config_path}
@@ -303,7 +306,7 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
         validate_abs_path(&mount.mount_path, "mount_path")?;
         if !matches!(
             mount.mount_type.as_str(),
-            "quark_open" | "system_config" | "url_tree" | "github_releases"
+            "quark_open" | "system_config" | "url_tree" | "github_releases" | "s3" | "minio"
         ) {
             bail!("unsupported mount type '{}'", mount.mount_type);
         }
@@ -386,6 +389,73 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                 }
                 if normalize_virtual_path(&mount.mount_path) == "/" {
                     bail!("system_config mount_path must be a file path, not /");
+                }
+            }
+            "s3" | "minio" => {
+                if let Some(root_path) = mount.root_path.as_deref() {
+                    validate_abs_path(root_path, "root_path")?;
+                }
+                for key in [
+                    "endpoint",
+                    "bucket",
+                    "region",
+                    "access_key",
+                    "access_key_id",
+                    "secret_key",
+                    "secret_access_key",
+                    "session_token",
+                    "proxy",
+                ] {
+                    if let Some(value) = mount.options.get(key)
+                        && !value.is_string()
+                    {
+                        bail!("options.{key} must be a string");
+                    }
+                }
+                for key in ["endpoint", "bucket"] {
+                    if mount
+                        .options
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .is_none()
+                    {
+                        bail!("s3 mounts need options.{key}");
+                    }
+                }
+                if mount
+                    .options
+                    .get("access_key")
+                    .or_else(|| mount.options.get("access_key_id"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .is_none()
+                {
+                    bail!("s3 mounts need options.access_key");
+                }
+                if mount
+                    .options
+                    .get("secret_key")
+                    .or_else(|| mount.options.get("secret_access_key"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .is_none()
+                {
+                    bail!("s3 mounts need options.secret_key");
+                }
+                if let Some(endpoint) = mount.options.get("endpoint").and_then(Value::as_str) {
+                    validate_http_url(endpoint, "options.endpoint")?;
+                }
+                if let Some(proxy) = mount.options.get("proxy").and_then(Value::as_str) {
+                    validate_http_url(proxy, "options.proxy")?;
+                }
+                for key in ["path_style", "force_path_style"] {
+                    if let Some(value) = mount.options.get(key)
+                        && !value.is_boolean()
+                        && !value.is_string()
+                    {
+                        bail!("options.{key} must be a boolean");
+                    }
                 }
             }
             _ => unreachable!(),

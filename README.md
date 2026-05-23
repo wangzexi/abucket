@@ -145,6 +145,29 @@ auth:
 
 Multiple `github_releases` mounts may share the same `mount_path`; their latest release assets are merged into one flat directory. `/client/*` matches descendants at any depth, but not `/client` itself. Listable directories should be granted explicitly.
 
+S3/MinIO bucket 可以用 `s3` 挂载。第一版支持 path-style endpoint，覆盖列目录、GET/HEAD、PUT 和 DELETE；适合把已有 MinIO bucket 原地接进 atree：
+
+```yaml
+mounts:
+  - mount_path: /file
+    type: s3
+    root_path: /
+    options:
+      endpoint: http://minio.minio.svc.cluster.local:9000
+      bucket: file
+      region: us-east-1
+      access_key: atree-user
+      secret_key: '<private>'
+      path_style: true
+auth:
+  rules:
+    - principal: anonymous
+      actions: [ListBucket, HeadObject, GetObject]
+      resources: [/file, /file/*]
+```
+
+如果想让 `files.example.com/foo.txt` 直接对应 bucket 里的 `foo.txt`，可以把这个 mount 的 `mount_path` 改成 `/`，再把 `files.example.com` 的 Ingress 指到 atree 服务。
+
 ## 简单测试
 
 不做 AWS Signature 校验；服务自己的权限用 `Authorization: Bearer <key>` 控制。配置里允许匿名时可以用 AWS CLI 的匿名模式：

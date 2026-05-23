@@ -1444,6 +1444,7 @@ async fn list_objects(
             remote_key,
             config: s3_config,
         }) => {
+            let synthetic_listing = synthetic_mount_listing(&config, &prefix, delimiter.as_deref());
             drop(config);
             return list_s3_mount(
                 &state,
@@ -1457,6 +1458,7 @@ async fn list_objects(
                 &virtual_prefix,
                 remote_key,
                 s3_config,
+                synthetic_listing,
             )
             .await;
         }
@@ -1644,6 +1646,7 @@ async fn list_s3_mount(
     virtual_prefix: &str,
     remote_prefix: String,
     config: S3Config,
+    synthetic_listing: (Vec<S3Entry>, Vec<String>),
 ) -> Response {
     let remote_delimiter = delimiter.filter(|value| *value == "/");
     let listing = match s3_list_objects(
@@ -1660,7 +1663,7 @@ async fn list_s3_mount(
     };
     let base_virtual = virtual_prefix.trim_matches('/');
     let base_remote = remote_prefix.trim_matches('/');
-    let entries = listing
+    let mut entries = listing
         .objects
         .into_iter()
         .map(|object| S3Entry {
@@ -1669,7 +1672,7 @@ async fn list_s3_mount(
             modified: object.modified,
         })
         .collect::<Vec<_>>();
-    let common_prefixes = listing
+    let mut common_prefixes = listing
         .common_prefixes
         .into_iter()
         .map(|prefix| {
@@ -1682,6 +1685,7 @@ async fn list_s3_mount(
         })
         .filter(|prefix| !prefix.is_empty())
         .collect::<Vec<_>>();
+    merge_later_listing(&mut entries, &mut common_prefixes, synthetic_listing);
     let xml = list_xml_string(
         bucket,
         prefix,
@@ -1693,6 +1697,32 @@ async fn list_s3_mount(
     );
     cache_list_xml(state, list_cache_key, &xml).await;
     xml_response(StatusCode::OK, xml)
+}
+
+fn merge_later_listing(
+    entries: &mut Vec<S3Entry>,
+    common_prefixes: &mut Vec<String>,
+    later: (Vec<S3Entry>, Vec<String>),
+) {
+    let (later_entries, later_common_prefixes) = later;
+    if later_entries.is_empty() && later_common_prefixes.is_empty() {
+        return;
+    }
+    let mut overridden = std::collections::HashSet::new();
+    for entry in &later_entries {
+        overridden.insert(listing_identity(&entry.key));
+    }
+    for prefix in &later_common_prefixes {
+        overridden.insert(listing_identity(prefix));
+    }
+    entries.retain(|entry| !overridden.contains(&listing_identity(&entry.key)));
+    common_prefixes.retain(|prefix| !overridden.contains(&listing_identity(prefix)));
+    entries.extend(later_entries);
+    common_prefixes.extend(later_common_prefixes);
+}
+
+fn listing_identity(value: &str) -> String {
+    value.trim_matches('/').to_string()
 }
 
 async fn s3_list_objects(
@@ -5009,6 +5039,48 @@ cache:
         assert!(body.contains("<Prefix>client/</Prefix>"));
         assert!(body.contains("<Prefix>api/</Prefix>"));
         assert_eq!(body.matches("<Prefix>client/</Prefix>").count(), 1);
+    }
+
+    #[test]
+    fn later_synthetic_listing_overrides_s3_listing_names() {
+        let mut entries = vec![
+            S3Entry {
+                key: "api/config.yaml".to_string(),
+                size: 10,
+                modified: 1,
+            },
+            S3Entry {
+                key: "plain.txt".to_string(),
+                size: 20,
+                modified: 1,
+            },
+        ];
+        let mut common_prefixes = vec!["client/".to_string(), "docs/".to_string()];
+        merge_later_listing(
+            &mut entries,
+            &mut common_prefixes,
+            (
+                vec![S3Entry {
+                    key: "api/config.yaml".to_string(),
+                    size: 0,
+                    modified: 2,
+                }],
+                vec!["client/".to_string()],
+            ),
+        );
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["plain.txt", "api/config.yaml"]
+        );
+        assert_eq!(entries[1].modified, 2);
+        assert_eq!(
+            common_prefixes,
+            vec!["docs/".to_string(), "client/".to_string()]
+        );
     }
 
     #[tokio::test]

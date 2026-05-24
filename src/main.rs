@@ -1358,12 +1358,17 @@ async fn list_objects(
         prefix.clone()
     };
 
-    if !is_authorized(&state, headers, "ListBucket", &virtual_prefix).await {
+    let principal = resolve_principal(&state, headers).await;
+    let config = state.config.read().await;
+    if !policy_allows(&config, &principal, "ListBucket", &virtual_prefix) {
+        drop(config);
         return access_denied_response(&state, headers, &bucket).await;
     }
+    drop(config);
 
     let list_cache_key = tree_list_cache_key(
         &bucket,
+        &principal,
         &virtual_prefix,
         &prefix,
         delimiter.as_deref(),
@@ -1382,7 +1387,7 @@ async fn list_objects(
             .all(|(rest, _)| rest.trim_matches('/').is_empty())
     {
         let (synthetic_entries, synthetic_prefixes) =
-            synthetic_mount_listing(&config, &prefix, delimiter.as_deref());
+            synthetic_mount_listing(&config, &principal, &prefix, delimiter.as_deref());
         drop(config);
         return list_github_releases_many(
             &state,
@@ -1440,7 +1445,8 @@ async fn list_objects(
             remote_key,
             config: s3_config,
         }) => {
-            let synthetic_listing = synthetic_mount_listing(&config, &prefix, delimiter.as_deref());
+            let synthetic_listing =
+                synthetic_mount_listing(&config, &principal, &prefix, delimiter.as_deref());
             drop(config);
             return list_s3_mount(
                 &state,
@@ -1460,7 +1466,7 @@ async fn list_objects(
         }
         None => {
             let (entries, common_prefixes) =
-                synthetic_mount_listing(&config, &prefix, delimiter.as_deref());
+                synthetic_mount_listing(&config, &principal, &prefix, delimiter.as_deref());
             if !entries.is_empty() || !common_prefixes.is_empty() {
                 drop(config);
                 let xml = list_xml_string(
@@ -1578,6 +1584,7 @@ async fn list_objects(
 
 fn synthetic_mount_listing(
     config: &ServiceConfig,
+    principal: &str,
     prefix: &str,
     delimiter: Option<&str>,
 ) -> (Vec<S3Entry>, Vec<String>) {
@@ -1613,6 +1620,10 @@ fn synthetic_mount_listing(
         } else {
             format!("{}/{}", current.trim_start_matches('/'), first)
         };
+        let resource = format!("/{}", key.trim_matches('/'));
+        if !policy_allows(config, principal, "ListBucket", &resource) {
+            continue;
+        }
         if !seen.insert(key.clone()) {
             continue;
         }
@@ -2450,6 +2461,7 @@ where
 
 fn tree_list_cache_key(
     bucket: &str,
+    principal: &str,
     resource: &str,
     prefix: &str,
     delimiter: Option<&str>,
@@ -2457,7 +2469,7 @@ fn tree_list_cache_key(
     offset: usize,
 ) -> String {
     format!(
-        "/.atree/cache/tree/ListBucket/bucket={bucket}/resource={resource}/prefix={prefix}/delimiter={}/max={max_keys}/offset={offset}",
+        "/.atree/cache/tree/ListBucket/bucket={bucket}/principal={principal}/resource={resource}/prefix={prefix}/delimiter={}/max={max_keys}/offset={offset}",
         delimiter.unwrap_or("")
     )
 }
@@ -5273,7 +5285,11 @@ cache:
                 rules: vec![AuthRule {
                     principal: "anonymous".to_string(),
                     actions: vec!["ListBucket".to_string()],
-                    resources: vec!["/".to_string(), "/release".to_string()],
+                    resources: vec![
+                        "/".to_string(),
+                        "/release".to_string(),
+                        "/release/*".to_string(),
+                    ],
                 }],
             },
             cache: CacheConfig::default(),
@@ -5293,7 +5309,7 @@ cache:
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
         assert!(body.contains("<Prefix>release/</Prefix>"));
-        assert!(body.contains("<Prefix>api/</Prefix>"));
+        assert!(!body.contains("<Prefix>api/</Prefix>"));
         assert_eq!(body.matches("<Prefix>release/</Prefix>").count(), 1);
 
         let response = app

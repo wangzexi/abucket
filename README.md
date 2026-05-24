@@ -4,7 +4,7 @@
 
 它参考了 OpenList 的 QuarkOpen、GitHub Release 等 driver 思路，目前实现：
 
-- `GET /`：浏览器返回文件界面壳，S3/curl 返回 bucket XML
+- `GET /`：浏览器返回文件界面壳，S3/curl 返回当前树的 ListBucket XML
 - `GET /quark?list-type=2&delimiter=/&prefix=...`：列对象和目录
 - `GET /quark/<key>`：下载对象
 - `HEAD /quark/<key>`：对象元信息
@@ -25,7 +25,7 @@ export ATREE_ROOT_KEY='换成你的 root key'
 cargo run
 ```
 
-S3 bucket 名、mount、权限和缓存策略都写在 `/api/config.yaml` 里。夸克只支持 `quark_open` OAuth，不再支持网页登录 Cookie。
+S3 bucket 名、mount、权限和缓存策略都写在 `/api/config.yaml` 里。整个服务只有一个 bucket，bucket 里面的 key 空间就是 atree 的挂载树。夸克只支持 `quark_open` OAuth，不再支持网页登录 Cookie。
 
 首次启动会创建 SQLite 配置库，默认位置：
 
@@ -53,7 +53,7 @@ curl -X PUT \
 
 `/api/config.yaml` 也走同一套权限模型：读取需要 `GetObject`，修改需要 `PutObject`，资源路径就是 `/api/config.yaml`。未命中任何 `auth.rules` 的请求，只有 `ATREE_ROOT_KEY` 对应的 `root` 身份还能访问，用作第一次写入配置或救援。
 
-`s3_bucket` 是 S3 path-style 客户端看到的 bucket 名。夸克挂载使用 QuarkOpen OAuth。`oauth_file` 是本机私密文件，里面保存 access token、refresh token、refresh URL、app id 和 sign key；access token 过期时，atree 会用 refresh token 刷新，并把新 token 写回这个 YAML：
+`s3_bucket` 是 S3 path-style 客户端看到的 bucket 名；S3 请求里的 `/atree/quark/file.txt` 会映射到内部树路径 `/quark/file.txt`。夸克挂载使用 QuarkOpen OAuth。`oauth_file` 是本机私密文件，里面保存 access token、refresh token、refresh URL、app id 和 sign key；access token 过期时，atree 会用 refresh token 刷新，并把新 token 写回这个 YAML：
 
 ```yaml
 s3_bucket: atree
@@ -216,7 +216,7 @@ restic -r 's3:http://127.0.0.1:9000/quark/我的备份/restic-repo' \
 也可以用 `curl`：
 
 ```bash
-curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/quark?list-type=2&delimiter=/'
+curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/?list-type=2&delimiter=/&prefix=quark/'
 curl -H 'Authorization: Bearer <key>' -T /tmp/atree.txt 'http://127.0.0.1:9000/quark/examples/atree.txt'
 curl -H 'Authorization: Bearer <key>' 'http://127.0.0.1:9000/quark/examples/atree.txt'
 ```
@@ -238,9 +238,9 @@ const client = new Client({
 await client.fPutObject("quark", "examples/file.txt", "/tmp/file.txt");
 ```
 
-浏览器打开 `http://127.0.0.1:9000/` 会进入内置文件浏览器壳。目录访问会优先寻找 `index*` 文件；没有 index 时返回文件浏览器壳，再由前端读取本地保存的 key 并请求同路径的列表接口。程序访问同一路径时仍然返回 S3 XML。
+浏览器打开 `http://127.0.0.1:9000/` 会进入内置文件浏览器壳。目录访问会优先寻找 `index*` 文件；没有 index 时返回文件浏览器壳，再由前端读取本地保存的 key 并请求同路径的 S3 ListObjectsV2 接口。程序访问同一路径时仍然返回 S3 XML。
 
-浏览器目录页本身不绕过权限。即使是根路径 `/`，前端也会再请求同路径上的浏览器列表接口；如果当前 key 对该路径没有 `ListBucket` 权限，页面会显示“需要访问 key。”而不是偷偷列出内容。
+浏览器目录页本身不绕过权限。即使是根路径 `/`，前端也会再请求同路径上的 S3 列表接口；如果当前 key 对该路径没有 `ListBucket` 权限，页面会显示“需要访问 key。”而不是偷偷列出内容。
 
 ## 配置项
 

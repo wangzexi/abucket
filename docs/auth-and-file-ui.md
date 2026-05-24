@@ -4,47 +4,45 @@ This document records the simplified auth, config, and file UI model for `atree`
 
 ## Core Idea
 
-Keep the service small. It has only two API families:
+Keep the service small. It has one public resource model:
 
 ```text
-1. S3-style object routes
-2. Whole-config/system-file mount routes
+one mounted tree
+  -> S3-style object operations
+  -> optional browser shell for humans
 ```
 
 The S3 URL space is also the file browser URL space.
 
 There should not be separate browser-only path families such as `/api/files` or `/api/download`. A browser visiting an S3 path gets a file-browser HTML shell when appropriate. S3 clients and curl still get normal S3 XML/object responses.
 
-The browser shell does use one internal same-path subrequest shape for directory listing:
+The browser shell does not have its own listing API. It renders the same tree by making the same S3 ListObjectsV2 request a client would make:
 
 ```text
-GET <same path>?atree-browser-list=1
-Accept: application/json
+GET <same path>?list-type=2&delimiter=/&prefix=<current-prefix>
+Accept: application/xml
 Authorization: Bearer <key>
 ```
-
-This is not a second public file API. It is just the browser asking the same path for structured directory entries.
 
 ## Route Model
 
 S3/object routes:
 
 ```text
-GET    /
-GET    /{bucket}
-HEAD   /{bucket}
-PUT    /{bucket}
-GET    /{bucket}/{key}
-HEAD   /{bucket}/{key}
-PUT    /{bucket}/{key}
-DELETE /{bucket}/{key}
-POST   /{bucket}/{key}?uploads
-PUT    /{bucket}/{key}?partNumber=<n>&uploadId=<id>
-POST   /{bucket}/{key}?uploadId=<id>
-DELETE /{bucket}/{key}?uploadId=<id>
+GET    /?list-type=2&delimiter=/
+GET    /{key}
+HEAD   /{key}
+PUT    /{key}
+DELETE /{key}
+POST   /{key}?uploads
+PUT    /{key}?partNumber=<n>&uploadId=<id>
+POST   /{key}?uploadId=<id>
+DELETE /{key}?uploadId=<id>
 ```
 
-Config routes:
+For S3 path-style clients, the configured `s3_bucket` is just the bucket label for the same tree. A client request like `/atree/quark/file.txt` is normalized to the internal tree path `/quark/file.txt` when it is recognizably an S3 request. Human/browser paths can still use `/quark/file.txt` directly.
+
+Config is not a separate API family. It is one mounted file in the same tree:
 
 ```text
 GET  /api/config.yaml
@@ -128,12 +126,12 @@ can serve:
 
 The HTML file browser shell is only the fallback when there is no index file.
 
-If the fallback file browser shell is returned, it reads the key from `localStorage`, then requests the same path with a browser-list query and auth header to render the listing:
+If the fallback file browser shell is returned, it reads the key from `localStorage`, then requests the same path with S3 ListObjectsV2 and auth header to render the listing:
 
 ```text
-GET /public/?atree-browser-list=1
+GET /public/?list-type=2&delimiter=/&prefix=public/
 Authorization: Bearer <key>
-Accept: application/json
+Accept: application/xml
 ```
 
 If no key is stored, it tries anonymously. If the listing returns `AccessDenied`, the UI asks for a key, stores it in `localStorage`, then retries the same request with `Authorization: Bearer <key>`.
@@ -239,8 +237,8 @@ The copied command is for AI/Codex or shell use. The `config.yaml` header commen
 The root shell should not bypass auth. It follows the same rule as any other directory shell:
 
 ```text
-GET /                     -> HTML shell
-GET /?atree-browser-list=1 -> requires ListBucket on /
+GET /                                      -> HTML shell for browsers
+GET /?list-type=2&delimiter=/             -> requires ListBucket on /
 ```
 
 If the current caller is not allowed to list `/`, the shell stays visible but the file list should not render.
@@ -249,7 +247,7 @@ If the current caller is not allowed to list `/`, the shell stays visible but th
 
 The browser UI uses a simple key as a lightweight login.
 
-1. User opens `/` or a bucket/path URL.
+1. User opens `/` or a tree path URL.
 2. UI tries to list the current path anonymously.
 3. If anonymous listing is denied, UI asks for an access key.
 4. UI stores the key in `localStorage`.
@@ -278,7 +276,7 @@ GET /api/config.yaml
 PUT /api/config.yaml
 ```
 
-The config API is YAML-only at the HTTP boundary. `GET /api/config.yaml` returns explanatory comments for humans and AI agents, and `PUT /api/config.yaml` ignores those comments naturally. This path behaves like a special system file mount: reading it requires `GetObject` on the current config path, and updating it requires `PutObject` on that same path. Requests that do not match any allow rule still remain accessible to the environment root key for bootstrap and recovery.
+The config API is YAML-only at the HTTP boundary. `GET /api/config.yaml` returns explanatory comments for humans and AI agents, and `PUT /api/config.yaml` ignores those comments naturally. This path behaves like a mounted system file: reading it requires `GetObject` on the current config path, and updating it requires `PutObject` on that same path. Requests that do not match any allow rule still remain accessible to the environment root key for bootstrap and recovery.
 
 The config endpoint is not special outside the mount model. It is a `system_config` mount. A user can move it by editing `mounts`, but validation must require at least one enabled `system_config` mount so the service cannot easily lose its editable config file.
 

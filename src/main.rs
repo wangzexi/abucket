@@ -942,6 +942,70 @@ fn has_virtual_directory(config: &ServiceConfig, virtual_path: &str) -> bool {
         .any(|mount_path| mount_path == current || mount_path.starts_with(&prefix))
 }
 
+fn is_list_query(params: &HashMap<String, String>) -> bool {
+    params.contains_key("list-type")
+        || params.contains_key("prefix")
+        || params.contains_key("delimiter")
+        || params.contains_key("max-keys")
+        || params.contains_key("marker")
+        || params.contains_key("continuation-token")
+}
+
+fn is_s3_path_style_request(
+    method: &Method,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> bool {
+    if is_list_query(params)
+        || params.contains_key("location")
+        || params.contains_key("uploads")
+        || params.contains_key("uploadId")
+        || params.contains_key("partNumber")
+    {
+        return true;
+    }
+    if !matches!(method, &Method::GET) {
+        return true;
+    }
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("AWS4-HMAC-SHA256"))
+    {
+        return true;
+    }
+    headers
+        .keys()
+        .any(|name| name.as_str().starts_with("x-amz-"))
+}
+
+fn request_virtual_path(
+    decoded_path: &str,
+    has_trailing_slash: bool,
+    bucket: &str,
+    method: &Method,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> String {
+    let mut path = decoded_path.trim_matches('/').to_string();
+    if is_s3_path_style_request(method, headers, params) {
+        let bucket = bucket.trim_matches('/');
+        if path == bucket {
+            path.clear();
+        } else if let Some(rest) = path.strip_prefix(&format!("{bucket}/")) {
+            path = rest.to_string();
+        }
+    }
+    if path.is_empty() {
+        return "/".to_string();
+    }
+    if has_trailing_slash {
+        format!("/{}/", path.trim_matches('/'))
+    } else {
+        format!("/{}", path.trim_matches('/'))
+    }
+}
+
 async fn root_handler(
     State(state): State<AppState>,
     RawQuery(raw_query): RawQuery,
@@ -973,13 +1037,7 @@ async fn root_handler(
                 .to_string(),
         );
     }
-    if params.contains_key("list-type")
-        || params.contains_key("prefix")
-        || params.contains_key("delimiter")
-        || params.contains_key("max-keys")
-        || params.contains_key("marker")
-        || params.contains_key("continuation-token")
-    {
+    if is_list_query(&params) {
         return list_objects(state, raw_query, "/", &headers).await;
     }
     list_objects(state, raw_query, "/", &headers).await
@@ -1074,12 +1132,16 @@ async fn object_handler(
     let bucket = state_bucket(&state).await;
     let path = percent_decode_path(&path);
     let has_trailing_slash = path.ends_with('/') && !path.is_empty();
-    let virtual_path = if has_trailing_slash {
-        format!("/{}/", path.trim_matches('/'))
-    } else {
-        format!("/{}", path.trim_matches('/'))
-    };
     let raw_query = raw_query.unwrap_or_default();
+    let params = parse_query(&raw_query);
+    let virtual_path = request_virtual_path(
+        &path,
+        has_trailing_slash,
+        &bucket,
+        &method,
+        &headers,
+        &params,
+    );
     if method == Method::GET && wants_html(&headers) {
         let config = state.config.read().await;
         let is_virtual_dir = has_virtual_directory(&config, &virtual_path);
@@ -1089,9 +1151,12 @@ async fn object_handler(
         }
     }
     if virtual_path == "/" {
+        if is_list_query(&params) {
+            return list_objects(state, raw_query, &virtual_path, &headers).await;
+        }
         return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "key not found");
     }
-    if method == Method::GET && has_trailing_slash {
+    if method == Method::GET && (has_trailing_slash || is_list_query(&params)) {
         return list_objects(state, raw_query, &virtual_path, &headers).await;
     }
     if method == Method::HEAD && has_trailing_slash {
@@ -1105,7 +1170,6 @@ async fn object_handler(
         );
     }
 
-    let params = parse_query(&raw_query);
     let config = state.config.read().await;
     let resolved_mount = resolve_mount(&config, &virtual_path);
     let action = match method {
@@ -4269,6 +4333,40 @@ cache:
         assert!(xml.contains("<Code>AccessDenied"));
     }
 
+    #[test]
+    fn s3_path_style_bucket_prefix_maps_to_tree_root() {
+        let headers = HeaderMap::new();
+        let params = parse_query("list-type=2&delimiter=/");
+        assert_eq!(
+            request_virtual_path("atree", false, "atree", &Method::GET, &headers, &params),
+            "/"
+        );
+        assert_eq!(
+            request_virtual_path(
+                "atree/quark/restic-repo",
+                false,
+                "atree",
+                &Method::GET,
+                &headers,
+                &params
+            ),
+            "/quark/restic-repo"
+        );
+
+        let direct_params = HashMap::new();
+        assert_eq!(
+            request_virtual_path(
+                "atree/quark/restic-repo",
+                false,
+                "atree",
+                &Method::GET,
+                &headers,
+                &direct_params
+            ),
+            "/atree/quark/restic-repo"
+        );
+    }
+
     #[tokio::test]
     async fn synthetic_directory_browser_shell_defers_auth_to_client_fetch() {
         let state = test_state();
@@ -4723,7 +4821,7 @@ cache:
     }
 
     #[tokio::test]
-    async fn old_json_config_route_is_not_exposed() {
+    async fn json_config_route_is_not_exposed() {
         let state = test_state();
         *state.config.write().await = ServiceConfig {
             s3_bucket: "atree".to_string(),
@@ -4751,7 +4849,7 @@ cache:
     }
 
     #[tokio::test]
-    async fn old_help_route_is_not_supported() {
+    async fn help_route_is_not_supported() {
         let state = test_state();
         *state.config.write().await = ServiceConfig {
             s3_bucket: "atree".to_string(),

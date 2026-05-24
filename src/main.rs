@@ -22,7 +22,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, RawQuery, State},
+    extract::{DefaultBodyLimit, Path, RawQuery, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::any,
@@ -918,6 +918,7 @@ fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/", any(root_handler))
         .route("/{*path}", any(object_handler))
+        .layer(DefaultBodyLimit::disable())
         .with_state(state)
 }
 
@@ -4694,6 +4695,28 @@ cache:
             .unwrap();
         assert_eq!(location.status(), StatusCode::OK);
         assert!(response_text(location).await.contains("us-east-1"));
+    }
+
+    #[tokio::test]
+    async fn large_put_reaches_s3_handler_without_default_body_limit() {
+        let state = test_state();
+        let app = build_app(state.app_state());
+        let body = vec![b'x'; 3 * 1024 * 1024];
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/missing-large.bin")
+                    .header(header::AUTHORIZATION, "Bearer root-test-key")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(response_text(response).await.contains("<Code>NoSuchKey</Code>"));
     }
 
     #[tokio::test]

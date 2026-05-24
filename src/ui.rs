@@ -141,11 +141,6 @@ pub(crate) fn file_browser_html(
       if (prefix) u.searchParams.set('prefix', prefix);
       return u;
     }}
-    function browserListUrl() {{
-      var u = new URL(location.pathname, location.origin);
-      u.searchParams.set('atree-browser-list', '1');
-      return u;
-    }}
     function headers(accept) {{
       var h = {{ Accept: accept || 'application/xml' }};
       var key = currentKey();
@@ -361,63 +356,40 @@ pub(crate) fn file_browser_html(
         renderItems(DIRECTORY_ENTRIES);
         return Promise.resolve();
       }}
-      function loadS3List() {{
-        return fetch(listUrl(), {{ headers: headers() }})
-          .then(function(res) {{
-            if (res.status === 403 || res.status === 401) {{
-              renderStatus('需要访问 key。', true);
-              return null;
-            }}
-            if (!res.ok) {{
-              renderStatus('列表失败：' + res.status, true);
-              return null;
-            }}
-            return res.text().then(function(xmlBody) {{
-              var doc = new DOMParser().parseFromString(xmlBody, 'application/xml');
-              var prefix = xmlText(doc, 'Prefix') || keyPrefixFromPath();
-              var items = [];
-              var prefixes = xmlNodes(doc, 'CommonPrefixes');
-              for (var i = 0; i < prefixes.length; i += 1) {{
-                var full = xmlText(prefixes[i], 'Prefix');
-                var name = full.slice(prefix.length).replace(/\/$/, '');
-                if (name) items.push({{ type: 'dir', name: name, href: '/' + full }});
-              }}
-              var contents = xmlNodes(doc, 'Contents');
-              for (var j = 0; j < contents.length; j += 1) {{
-                var fullKey = xmlText(contents[j], 'Key');
-                var fileName = fullKey.slice(prefix.length);
-                if (!fileName || fileName.indexOf('/') >= 0) continue;
-                items.push({{
-                  type: 'file',
-                  name: fileName,
-                  href: '/' + fullKey,
-                  size: xmlText(contents[j], 'Size'),
-                  time: xmlText(contents[j], 'LastModified')
-                }});
-              }}
-              renderItems(items);
-            }});
-          }});
-      }}
-      return fetch(browserListUrl(), {{ headers: headers('application/json') }})
+      return fetch(listUrl(), {{ headers: headers() }})
         .then(function(res) {{
           if (res.status === 403 || res.status === 401) {{
             renderStatus('需要访问 key。', true);
             return null;
           }}
-          if (res.status === 404) {{
-            return loadS3List();
-          }}
           if (!res.ok) {{
             renderStatus('列表失败：' + res.status, true);
             return null;
           }}
-          return res.json().then(function(items) {{
-            if (items.length) {{
-              renderItems(items);
-              return null;
+          return res.text().then(function(xmlBody) {{
+            var doc = new DOMParser().parseFromString(xmlBody, 'application/xml');
+            var prefix = xmlText(doc, 'Prefix') || keyPrefixFromPath();
+            var items = [];
+            var prefixes = xmlNodes(doc, 'CommonPrefixes');
+            for (var i = 0; i < prefixes.length; i += 1) {{
+              var full = xmlText(prefixes[i], 'Prefix');
+              var name = full.slice(prefix.length).replace(/\/$/, '');
+              if (name) items.push({{ type: 'dir', name: name, href: '/' + full }});
             }}
-            return loadS3List();
+            var contents = xmlNodes(doc, 'Contents');
+            for (var j = 0; j < contents.length; j += 1) {{
+              var fullKey = xmlText(contents[j], 'Key');
+              var fileName = fullKey.slice(prefix.length);
+              if (!fileName || fileName.indexOf('/') >= 0) continue;
+              items.push({{
+                type: 'file',
+                name: fileName,
+                href: '/' + fullKey,
+                size: xmlText(contents[j], 'Size'),
+                time: xmlText(contents[j], 'LastModified')
+              }});
+            }}
+            renderItems(items);
           }});
         }});
     }}

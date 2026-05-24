@@ -4512,7 +4512,7 @@ cache:
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
         assert!(body.contains("var DIRECTORY_ENTRIES = null;"));
-        assert!(body.contains("u.searchParams.set('atree-browser-list', '1');"));
+        assert!(body.contains("u.searchParams.set('list-type', '2');"));
     }
 
     #[tokio::test]
@@ -4534,7 +4534,7 @@ cache:
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
         assert!(body.contains("var DIRECTORY_ENTRIES = null;"));
-        assert!(body.contains("u.searchParams.set('atree-browser-list', '1');"));
+        assert!(body.contains("u.searchParams.set('list-type', '2');"));
     }
 
     #[tokio::test]

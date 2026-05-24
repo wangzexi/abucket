@@ -1185,30 +1185,17 @@ async fn object_handler(
     if !is_authorized(&state, &headers, action, &virtual_path).await {
         return access_denied_response(&state, &headers, &bucket).await;
     }
-    let github_release_mounts = if matches!(method, Method::GET | Method::HEAD) {
-        resolve_github_release_mounts(&config, &virtual_path)
-    } else {
-        Vec::new()
-    };
-    if github_release_mounts.len() > 1 {
-        drop(config);
-        return github_releases_object_any(
-            &state,
-            method,
-            &headers,
-            &virtual_path,
-            github_release_mounts,
-        )
-        .await;
-    }
     let mount = match resolved_mount {
         Some(mount) => mount,
         None => return s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "mount not found"),
     };
-    drop(config);
     let (remote_key, backend) = match mount {
-        ResolvedMount::QuarkOpen { remote_key, config } => {
-            let quark = match quark_open_client(config) {
+        ResolvedMount::QuarkOpen {
+            remote_key,
+            config: quark_config,
+        } => {
+            drop(config);
+            let quark = match quark_open_client(quark_config) {
                 Ok(quark) => quark,
                 Err(err) => {
                     return s3_error(StatusCode::BAD_REQUEST, "InvalidConfig", &err.to_string());
@@ -1217,16 +1204,48 @@ async fn object_handler(
             (remote_key, QuarkBackend::Open(quark))
         }
         ResolvedMount::SystemConfig { virtual_path } => {
+            drop(config);
             return system_file_handler(&state, method, &headers, body, &virtual_path).await;
         }
         ResolvedMount::UrlTree { url, proxy } => {
+            drop(config);
             return url_object(method, &headers, &virtual_path, url, proxy).await;
         }
-        ResolvedMount::GithubReleases { rest, config } => {
-            return github_releases_object(&state, method, &headers, &virtual_path, rest, config)
+        ResolvedMount::GithubReleases {
+            rest,
+            config: release_config,
+        } => {
+            let github_release_mounts = if matches!(method, Method::GET | Method::HEAD) {
+                resolve_github_release_mounts(&config, &virtual_path)
+            } else {
+                Vec::new()
+            };
+            drop(config);
+            if github_release_mounts.len() > 1 {
+                return github_releases_object_any(
+                    &state,
+                    method,
+                    &headers,
+                    &virtual_path,
+                    github_release_mounts,
+                )
                 .await;
+            }
+            return github_releases_object(
+                &state,
+                method,
+                &headers,
+                &virtual_path,
+                rest,
+                release_config,
+            )
+            .await;
         }
-        ResolvedMount::S3 { remote_key, config } => {
+        ResolvedMount::S3 {
+            remote_key,
+            config: s3_config,
+        } => {
+            drop(config);
             return s3_object(
                 &state,
                 method,
@@ -1234,7 +1253,7 @@ async fn object_handler(
                 body,
                 &virtual_path,
                 remote_key,
-                config,
+                s3_config,
             )
             .await;
         }

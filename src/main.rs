@@ -1143,6 +1143,9 @@ async fn object_handler(
         &params,
     );
     if method == Method::GET && wants_html(&headers) {
+        if let Some(response) = browser_directory_index(&state, &virtual_path, &headers).await {
+            return response;
+        }
         let config = state.config.read().await;
         let is_virtual_dir = has_virtual_directory(&config, &virtual_path);
         drop(config);
@@ -3285,6 +3288,45 @@ async fn browser_directory(
     }
 }
 
+async fn browser_directory_index(
+    state: &AppState,
+    virtual_path: &str,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    let index_path = directory_index_path(virtual_path);
+    if !is_authorized(state, headers, "GetObject", &index_path).await {
+        return None;
+    }
+    let config = state.config.read().await;
+    let mount = resolve_mount(&config, &index_path)?;
+    drop(config);
+    match mount {
+        ResolvedMount::QuarkOpen { remote_key, config } => {
+            let backend = QuarkBackend::Open(quark_open_client(config).ok()?);
+            get_object_cached(state, &backend, &index_path, &remote_key, headers)
+                .await
+                .ok()
+        }
+        ResolvedMount::S3 { remote_key, config } => {
+            s3_get_object(&config, &remote_key, headers).await.ok()
+        }
+        ResolvedMount::UrlTree { url, proxy } => {
+            Some(url_object(Method::GET, headers, url, proxy).await)
+                .filter(|response| response.status().is_success())
+        }
+        _ => None,
+    }
+}
+
+fn directory_index_path(virtual_path: &str) -> String {
+    let base = virtual_path.trim_end_matches('/');
+    if base.is_empty() {
+        "/index.html".to_string()
+    } else {
+        format!("{base}/index.html")
+    }
+}
+
 async fn find_directory_index(state: &AppState, virtual_path: &str) -> Option<String> {
     let prefix = virtual_path.trim_matches('/');
     let config = state.config.read().await;
@@ -4437,6 +4479,57 @@ cache:
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
         assert!(body.contains("u.searchParams.set('list-type', '2');"));
+    }
+
+    #[tokio::test]
+    async fn browser_directory_serves_authorized_index_html_before_shell() {
+        let state = test_state();
+        let mut config = config_with_mounts(vec![
+            mount("/public", "/"),
+            MountConfig {
+                mount_path: "/api/config.yaml".to_string(),
+                mount_type: "system_config".to_string(),
+                root_path: None,
+                options: Value::Null,
+            },
+        ]);
+        config.auth.rules.push(AuthRule {
+            principal: "anonymous".to_string(),
+            actions: vec!["GetObject".to_string()],
+            resources: vec!["/public/site/index.html".to_string()],
+        });
+        *state.config.write().await = config;
+        write_cached_object(
+            &state,
+            "/public/site/index.html",
+            &CachedObject {
+                bytes: Bytes::from_static(b"<!doctype html><title>site index</title>"),
+                meta: CacheMeta {
+                    size: 40,
+                    modified: chrono_millis(),
+                    fetched_at: chrono_millis(),
+                    content_type: Some("text/html; charset=utf-8".to_string()),
+                },
+            },
+        )
+        .await;
+        let app = build_app(state.app_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/public/site")
+                    .header(header::ACCEPT, "text/html")
+                    .header(header::USER_AGENT, "Mozilla/5.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("site index"));
+        assert!(!body.contains("u.searchParams.set('list-type', '2');"));
     }
 
     #[tokio::test]

@@ -177,6 +177,14 @@ pub(crate) fn file_browser_html(config_path: &str) -> String {
         || /^video\//.test(contentType)
         || contentType === 'application/pdf';
     }}
+    function looksInlinePath(href) {{
+      try {{
+        var path = new URL(href, location.origin).pathname.toLowerCase();
+        return /\.(txt|md|json|xml|ya?ml|js|css|html?|svg|png|jpe?g|gif|webp|avif|pdf|mp3|m4a|wav|ogg|mp4|webm|mov)$/i.test(path);
+      }} catch (err) {{
+        return false;
+      }}
+    }}
     function fileNameFromDisposition(value) {{
       if (!value) return '';
       var utf8 = value.match(/filename\\*=UTF-8''([^;]+)/i);
@@ -271,8 +279,17 @@ pub(crate) fn file_browser_html(config_path: &str) -> String {
     }}
     function openFile(href, name) {{
       renderStatus('加载文件...', false);
-      return fetch(href, {{ headers: headers('*/*') }})
+      return fetch(href, {{ method: 'HEAD', headers: {{ Accept: '*/*' }} }})
+        .then(function(head) {{
+          var contentType = (head.headers.get('content-type') || '').toLowerCase();
+          if (head.ok && (looksInline(contentType) || looksInlinePath(href))) {{
+            location.href = href;
+            return null;
+          }}
+          return fetch(href, {{ headers: headers('*/*') }});
+        }})
         .then(function(res) {{
+          if (!res) return null;
           if (res.status === 403 || res.status === 401) {{
             renderStatus('需要访问 key。', true);
             return null;

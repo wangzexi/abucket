@@ -1362,6 +1362,8 @@ async fn list_objects(
             .iter()
             .all(|(rest, _)| rest.trim_matches('/').is_empty())
     {
+        let (synthetic_entries, synthetic_prefixes) =
+            synthetic_mount_listing(&config, &prefix, delimiter.as_deref());
         drop(config);
         return list_github_releases_many(
             &state,
@@ -1375,6 +1377,8 @@ async fn list_objects(
             delimiter.as_deref(),
             max_keys,
             offset,
+            synthetic_entries,
+            synthetic_prefixes,
         )
         .await;
     }
@@ -1593,7 +1597,7 @@ fn synthetic_mount_listing(
         if !seen.insert(key.clone()) {
             continue;
         }
-        let is_file = mount.mount_type == "system_config" && !rest.contains('/');
+        let is_file = synthetic_mount_is_file(mount, rest);
         if is_file {
             entries.push(S3Entry {
                 key,
@@ -1605,6 +1609,19 @@ fn synthetic_mount_listing(
         }
     }
     (entries, common_prefixes)
+}
+
+fn synthetic_mount_is_file(mount: &config::MountConfig, rest: &str) -> bool {
+    if rest.contains('/') {
+        return false;
+    }
+    if mount.mount_type == "system_config" {
+        return true;
+    }
+    mount.mount_type == "url_tree"
+        && rest.rsplit_once('.').is_some_and(|(_, ext)| {
+            !ext.is_empty() && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
+        })
 }
 
 async fn list_s3_mount(
@@ -2713,6 +2730,8 @@ async fn github_releases_object_any(
             Some("/"),
             1000,
             0,
+            Vec::new(),
+            Vec::new(),
         )
         .await;
     }
@@ -2834,7 +2853,7 @@ async fn list_github_releases(
     if wants_html(headers) {
         return html_response(StatusCode::OK, github_release_html(&config.repo, &entries));
     }
-    let entries = entries
+    let entries: Vec<S3Entry> = entries
         .into_iter()
         .map(|mut entry| {
             let key_prefix = prefix.trim_matches('/');
@@ -2860,6 +2879,8 @@ async fn list_github_releases_many(
     delimiter: Option<&str>,
     max_keys: usize,
     offset: usize,
+    extra_entries: Vec<S3Entry>,
+    extra_common_prefixes: Vec<String>,
 ) -> Response {
     let mut by_name = HashMap::<String, S3Entry>::new();
     for config in &configs {
@@ -2872,15 +2893,20 @@ async fn list_github_releases_many(
         }
     }
     let key_prefix = prefix.trim_matches('/');
+    for mut entry in extra_entries {
+        entry.key = strip_s3_prefix(key_prefix, &entry.key).to_string();
+        by_name.insert(entry.key.clone(), entry);
+    }
     let mut entries = by_name.into_values().collect::<Vec<_>>();
     entries.sort_by(|a, b| a.key.cmp(&b.key));
-    let total = entries.len();
+    let total = entries.len() + extra_common_prefixes.len();
     let next_token = if offset + max_keys < total {
         Some((offset + max_keys).to_string())
     } else {
         None
     };
-    let entries = entries
+    let entries_len = entries.len();
+    let entries: Vec<S3Entry> = entries
         .into_iter()
         .skip(offset)
         .take(max_keys)
@@ -2891,12 +2917,18 @@ async fn list_github_releases_many(
             entry
         })
         .collect();
+    let remaining = max_keys.saturating_sub(entries.len());
+    let common_prefixes = extra_common_prefixes
+        .into_iter()
+        .skip(offset.saturating_sub(entries_len))
+        .take(remaining)
+        .collect::<Vec<_>>();
     let xml = list_xml_string(
         bucket,
         prefix,
         delimiter,
         entries,
-        Vec::new(),
+        common_prefixes,
         max_keys,
         next_token.as_deref(),
     );
@@ -4547,6 +4579,7 @@ cache:
         let app = build_app(state.app_state());
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/")
@@ -4568,6 +4601,7 @@ cache:
         let app = build_app(state.app_state());
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api")
@@ -4598,6 +4632,7 @@ cache:
         let app = build_app(state.app_state());
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/quark/some-dir/")
@@ -5119,6 +5154,7 @@ cache:
         let state = test_state();
         let app = build_app(state.app_state());
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/?list-type=2&delimiter=/")
@@ -5149,16 +5185,24 @@ cache:
                     options: Value::Null,
                 },
                 MountConfig {
-                    mount_path: "/client".to_string(),
+                    mount_path: "/release".to_string(),
                     mount_type: "github_releases".to_string(),
                     root_path: Some("hiddify/hiddify-app".to_string()),
                     options: json!({"asset_allow": ["Hiddify-MacOS.dmg"]}),
                 },
                 MountConfig {
-                    mount_path: "/client".to_string(),
+                    mount_path: "/release".to_string(),
                     mount_type: "github_releases".to_string(),
                     root_path: Some("SagerNet/sing-box".to_string()),
                     options: json!({"asset_allow": ["sing-box-*-linux-amd64.tar.gz"]}),
+                },
+                MountConfig {
+                    mount_path: "/release/yacd-gh-pages.zip".to_string(),
+                    mount_type: "url_tree".to_string(),
+                    root_path: Some(
+                        "https://github.com/MetaCubeX/Yacd-meta/archive/gh-pages.zip".to_string(),
+                    ),
+                    options: Value::Null,
                 },
             ],
             auth: AuthConfig {
@@ -5166,13 +5210,14 @@ cache:
                 rules: vec![AuthRule {
                     principal: "anonymous".to_string(),
                     actions: vec!["ListBucket".to_string()],
-                    resources: vec!["/".to_string()],
+                    resources: vec!["/".to_string(), "/release".to_string()],
                 }],
             },
             cache: CacheConfig::default(),
         };
         let app = build_app(state.app_state());
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/?list-type=2&delimiter=/")
@@ -5184,9 +5229,24 @@ cache:
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
-        assert!(body.contains("<Prefix>client/</Prefix>"));
+        assert!(body.contains("<Prefix>release/</Prefix>"));
         assert!(body.contains("<Prefix>api/</Prefix>"));
-        assert_eq!(body.matches("<Prefix>client/</Prefix>").count(), 1);
+        assert_eq!(body.matches("<Prefix>release/</Prefix>").count(), 1);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/?list-type=2&delimiter=/&prefix=release/")
+                    .header(header::ACCEPT, "application/xml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("<Key>release/yacd-gh-pages.zip</Key>"));
+        assert!(!body.contains("<Prefix>release/yacd-gh-pages.zip/</Prefix>"));
     }
 
     #[test]

@@ -247,6 +247,7 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 #   quark_open.oauth_file: path to private OAuth YAML, such as quark-open-oauth.yaml.
 #   quark_open.access_token/refresh_token/app_id/sign_key/refresh_url can also be set directly.
 #   url_tree.proxy: optional outbound proxy URL, such as http://127.0.0.1:1080.
+#   url_tree.size: optional file size for file-shaped URL mounts when upstream HEAD is not reliable.
 #   github_releases.repo: owner/repo. If omitted, root_path can be owner/repo.
 #   github_releases.proxy: optional outbound proxy URL for API and downloads.
 #   github_releases.token: optional GitHub token for higher rate limits or private repos.

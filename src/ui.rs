@@ -66,6 +66,11 @@ pub(crate) fn file_browser_html(config_path: &str) -> String {
     td {{ font-size: 14px; }}
     td a {{ color: #2563eb; text-decoration: none; font-weight: 500; }}
     td a:hover {{ color: #1d4ed8; }}
+    .name-cell {{ min-width: 0; }}
+    .item-link {{ display: inline-flex; align-items: center; gap: 9px; min-width: 0; max-width: 100%; vertical-align: middle; }}
+    .item-icon {{ width: 18px; height: 18px; flex: 0 0 18px; color: #9ca3af; }}
+    .item-icon.dir {{ color: #2563eb; }}
+    .item-name {{ overflow-wrap: anywhere; }}
     .muted {{ color: #6b7280; }}
     .error {{ color: #b42318; }}
     .help {{ margin-top: 14px; font-size: 12px; color: #6b7280; word-break: break-all; }}
@@ -209,6 +214,12 @@ pub(crate) fn file_browser_html(config_path: &str) -> String {
       value = value.replace(/>/g, '&gt;');
       return value;
     }}
+    function itemIcon(type) {{
+      if (type === 'dir') {{
+        return '<svg class="item-icon dir" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.5A2.5 2.5 0 0 1 6 4h4.1a2 2 0 0 1 1.42.59L13.4 6.5H18a2.5 2.5 0 0 1 2.5 2.5v8.5A2.5 2.5 0 0 1 18 20H6a2.5 2.5 0 0 1-2.5-2.5z"></path></svg>';
+      }}
+      return '<svg class="item-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3.5H7A2.5 2.5 0 0 0 4.5 6v12A2.5 2.5 0 0 0 7 20.5h10A2.5 2.5 0 0 0 19.5 18V9z"></path><path d="M14 3.5V9h5.5"></path></svg>';
+    }}
     function blobToNamedObjectUrl(blob, contentType, downloadName) {{
       var namedBlob = blob;
       if (typeof File === 'function') {{
@@ -346,8 +357,10 @@ pub(crate) fn file_browser_html(config_path: &str) -> String {
       var html = '';
       for (var i = 0; i < items.length; i += 1) {{
         var item = items[i];
-        html += '<tr><td>'
-          + '<a data-kind="' + escapeHtml(item.type) + '" href="' + escapeHtml(item.href) + '">' + escapeHtml(item.name) + '</a></td>'
+        html += '<tr><td class="name-cell">'
+          + '<a class="item-link" data-kind="' + escapeHtml(item.type) + '" href="' + escapeHtml(item.href) + '">'
+          + itemIcon(item.type)
+          + '<span class="item-name">' + escapeHtml(item.name) + '</span></a></td>'
           + '<td class="size">' + (item.type === 'file' ? fmtBytes(item.size) : '') + '</td>'
           + '<td class="time muted">' + escapeHtml(item.time || '') + '</td></tr>';
       }}

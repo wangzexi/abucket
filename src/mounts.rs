@@ -53,6 +53,7 @@ pub(crate) enum ResolvedMount {
     UrlTree {
         url: String,
         proxy: Option<String>,
+        size: Option<u64>,
     },
     GithubReleases {
         rest: String,
@@ -127,12 +128,8 @@ pub(crate) fn resolve_mount(
             let rest = strip_mount_path(&mount.mount_path, &path);
             Some(ResolvedMount::UrlTree {
                 url: join_url_path(config::mount_root_path(mount), rest)?,
-                proxy: mount
-                    .options
-                    .get("proxy")
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.trim().is_empty())
-                    .map(ToString::to_string),
+                proxy: mount_option_string(&mount.options, "proxy"),
+                size: mount_option_u64(&mount.options, "size"),
             })
         }
         "github_releases" => {
@@ -213,6 +210,12 @@ fn mount_option_bool(options: &serde_json::Value, key: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+pub(crate) fn mount_option_u64(options: &serde_json::Value, key: &str) -> Option<u64> {
+    options
+        .get(key)
+        .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
 }
 
 fn mount_option_string_list(options: &serde_json::Value, key: &str) -> Vec<String> {

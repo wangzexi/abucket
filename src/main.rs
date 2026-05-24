@@ -15,8 +15,8 @@ mod ui;
 use crate::mounts::resolve_remote_key;
 use crate::mounts::{
     GithubReleasesConfig, QuarkOpenConfig, ResolvedMount, S3Config, backend_from_mount,
-    github_client, is_fnnas_quark_refresh_url, persist_quark_open_config, quark_open_client,
-    resolve_github_release_mounts, resolve_mount,
+    github_client, is_fnnas_quark_refresh_url, mount_option_u64, persist_quark_open_config,
+    quark_open_client, resolve_github_release_mounts, resolve_mount,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
@@ -1207,9 +1207,9 @@ async fn object_handler(
             drop(config);
             return system_file_handler(&state, method, &headers, body, &virtual_path).await;
         }
-        ResolvedMount::UrlTree { url, proxy } => {
+        ResolvedMount::UrlTree { url, proxy, size } => {
             drop(config);
-            return url_object(method, &headers, &virtual_path, url, proxy).await;
+            return url_object(method, &headers, &virtual_path, url, proxy, size).await;
         }
         ResolvedMount::GithubReleases {
             rest,
@@ -1620,7 +1620,7 @@ fn synthetic_mount_listing(
         if is_file {
             entries.push(S3Entry {
                 key,
-                size: 0,
+                size: mount_option_u64(&mount.options, "size").unwrap_or(0) as i64,
                 modified: chrono_millis(),
             });
         } else {
@@ -2573,6 +2573,7 @@ async fn url_object(
     virtual_path: &str,
     url: String,
     proxy: Option<String>,
+    size: Option<u64>,
 ) -> Response {
     if method != Method::GET && method != Method::HEAD {
         return s3_error(
@@ -2621,6 +2622,12 @@ async fn url_object(
         if let Some(value) = upstream_headers.get(&name) {
             resp.headers_mut().insert(name, value.clone());
         }
+    }
+    if let Some(size) = size
+        && method == Method::HEAD
+        && let Ok(value) = HeaderValue::from_str(&size.to_string())
+    {
+        resp.headers_mut().insert(header::CONTENT_LENGTH, value);
     }
     apply_browser_content_headers(&mut resp, virtual_path);
     resp
@@ -2703,7 +2710,15 @@ async fn github_releases_object(
         )
         .await;
     }
-    let mut response = url_object(method, headers, virtual_path, url, config.proxy.clone()).await;
+    let mut response = url_object(
+        method,
+        headers,
+        virtual_path,
+        url,
+        config.proxy.clone(),
+        None,
+    )
+    .await;
     if response.status().is_success() {
         let partial = response.status() == StatusCode::PARTIAL_CONTENT
             || response.headers().contains_key(header::CONTENT_RANGE);
@@ -3395,8 +3410,8 @@ async fn browser_directory_index(
                 .await
                 .ok()
         }
-        ResolvedMount::UrlTree { url, proxy } => {
-            Some(url_object(Method::GET, headers, &index_path, url, proxy).await)
+        ResolvedMount::UrlTree { url, proxy, size } => {
+            Some(url_object(Method::GET, headers, &index_path, url, proxy, size).await)
                 .filter(|response| response.status().is_success())
         }
         _ => None,
@@ -4227,7 +4242,7 @@ cache:
         ));
         assert!(matches!(
             resolve_mount(&config, "/github/client.tar.gz"),
-            Some(ResolvedMount::UrlTree { url, proxy })
+            Some(ResolvedMount::UrlTree { url, proxy, size: _ })
                 if url == "https://github.com/example-org/releases/client.tar.gz"
                     && proxy.as_deref() == Some("http://127.0.0.1:1080")
         ));
@@ -4702,6 +4717,7 @@ cache:
         let app = build_app(state.app_state());
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/public/site")
@@ -4724,6 +4740,7 @@ cache:
         let app = build_app(state.app_state());
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/")
@@ -5035,7 +5052,17 @@ cache:
 
     #[tokio::test]
     async fn url_tree_mount_streams_external_file() {
-        async fn upstream() -> Response {
+        async fn upstream(method: Method) -> Response {
+            if method == Method::HEAD {
+                return (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/plain"),
+                        (header::CONTENT_LENGTH, "0"),
+                    ],
+                )
+                    .into_response();
+            }
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "text/plain")],
@@ -5071,7 +5098,7 @@ cache:
                     mount_path: "/github".to_string(),
                     mount_type: "url_tree".to_string(),
                     root_path: Some(format!("http://{addr}/files")),
-                    options: Value::Null,
+                    options: json!({"size": 15}),
                 },
             ],
             auth: AuthConfig {
@@ -5087,6 +5114,7 @@ cache:
         let app = build_app(state.app_state());
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/github/client.txt")
@@ -5097,6 +5125,22 @@ cache:
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_text(response).await, "proxied payload");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri("/github/client.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_LENGTH).unwrap(),
+            "15"
+        );
     }
 
     #[tokio::test]
@@ -5221,7 +5265,7 @@ cache:
                     root_path: Some(
                         "https://github.com/MetaCubeX/Yacd-meta/archive/gh-pages.zip".to_string(),
                     ),
-                    options: Value::Null,
+                    options: json!({"size": 2277966}),
                 },
             ],
             auth: AuthConfig {
@@ -5265,6 +5309,7 @@ cache:
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
         assert!(body.contains("<Key>release/yacd-gh-pages.zip</Key>"));
+        assert!(body.contains("<Size>2277966</Size>"));
         assert!(!body.contains("<Prefix>release/yacd-gh-pages.zip/</Prefix>"));
     }
 

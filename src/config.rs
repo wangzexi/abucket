@@ -257,7 +257,9 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 #   s3.endpoint/bucket/access_key/secret_key: required for S3-compatible mounts.
 #   s3.region: optional, default us-east-1. s3.path_style: optional, default true.
 #   s3.proxy: optional outbound proxy URL.
-#   hide_from_parent: optional boolean. Allows direct access to this mount while hiding it from its parent listing.
+#   hide_from_parent: optional boolean. Hides this mount only from its parent directory listing.
+#     Direct requests to mount_path still resolve normally and still use auth.rules.
+#     This is discoverability control, not a security boundary.
 #   use {{}} or null when unused.
 # system_config note:
 #   mount_path is one mounted file path, not a directory. Example: {config_path}

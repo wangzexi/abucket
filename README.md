@@ -248,6 +248,10 @@ await client.fPutObject("quark", "examples/file.txt", "/tmp/file.txt");
 - `ATREE_ROOT_KEY`：root 恢复 key。未命中任何授权规则时，只有它仍可访问。
 - `ATREE_MULTIPART_DIR`：S3 multipart upload 的临时分片目录，默认系统临时目录下的 `atree/multipart`。
 - `BIND`：监听地址，默认 `127.0.0.1:9000`。
+
+### Mount options
+
+- `hide_from_parent`：只在父目录列目录时隐藏这个 mount；直接请求 `mount_path` 仍然会正常解析，并继续受 `auth.rules` 控制。它是可发现性控制，不是安全边界。
 ## 已知限制
 
 - 上传会把单个对象读进内存后再走夸克上传流程。restic 默认 pack 约 16 MiB，当前够用；如调大 `--pack-size`，主要留意服务内存占用。

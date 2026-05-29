@@ -358,7 +358,7 @@ impl QuarkOpenClient {
         body: Option<Value>,
     ) -> Result<T> {
         let method_name = method.as_str().to_string();
-        if self.needs_bootstrap_refresh().await {
+        if self.needs_initial_refresh().await {
             self.refresh_token().await?;
         }
         self.ensure_open_credentials().await?;
@@ -389,7 +389,7 @@ impl QuarkOpenClient {
         sign: (String, String, String),
     ) -> Result<T> {
         let method_name = method.as_str().to_string();
-        if self.needs_bootstrap_refresh().await {
+        if self.needs_initial_refresh().await {
             self.refresh_token().await?;
         }
         self.ensure_open_credentials().await?;
@@ -476,7 +476,7 @@ impl QuarkOpenClient {
         Ok((bytes, false))
     }
 
-    async fn needs_bootstrap_refresh(&self) -> bool {
+    async fn needs_initial_refresh(&self) -> bool {
         let config = self.config.lock().await;
         config.access_token.is_empty() || config.app_id.is_empty() || config.sign_key.is_empty()
     }
@@ -861,8 +861,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&multipart_dir)?;
     let cache_dir = cache_dir_path();
     std::fs::create_dir_all(&cache_dir)?;
-    let bootstrap_config_path = env::var_os("ATREE_BOOTSTRAP_CONFIG").map(PathBuf::from);
-    let config = load_or_init_config(&db_path, bootstrap_config_path.as_deref())?;
+    let config = load_or_init_config(&db_path)?;
     let root_key = env::var("ATREE_ROOT_KEY").ok();
     if root_key.is_none() {
         warn!("ATREE_ROOT_KEY is not set; only explicit auth rules will grant access");
@@ -4189,7 +4188,7 @@ mod tests {
             chrono_millis(),
             id
         ));
-        let config = load_or_init_config(&db_path, None).unwrap();
+        let config = load_or_init_config(&db_path).unwrap();
         let multipart_dir = std::env::temp_dir().join(format!(
             "atree-test-multipart-{}-{}-{}",
             std::process::id(),
@@ -4271,35 +4270,16 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_config_can_seed_empty_db() {
-        let root = TestDir::new("atree-bootstrap");
+    fn empty_db_is_initialized_with_default_config() {
+        let root = TestDir::new("atree-default-config");
         let db_path = root.join("atree.sqlite");
-        let bootstrap_path = root.join("config.yaml");
-        std::fs::write(
-            &bootstrap_path,
-            r#"
-s3_bucket: atree
-mounts:
-  - mount_path: /quark
-    type: quark_open
-    root_path: /
-    options:
-      oauth_file: /data/quark-open-oauth.yaml
-  - mount_path: /api/config.yaml
-    type: system_config
-auth:
-  keys: []
-  rules: []
-cache:
-  ttl_seconds: 600
-  max_bytes: 1048576
-"#,
-        )
-        .unwrap();
-        let config = load_or_init_config(&db_path, Some(&bootstrap_path)).unwrap();
-        assert_eq!(config.s3_bucket, "atree");
-        assert_eq!(config.cache.ttl_seconds, 600);
-        assert_eq!(config.mounts[0].mount_type, "quark_open");
+
+        let config = load_or_init_config(&db_path).unwrap();
+
+        assert_eq!(config, ServiceConfig::default());
+
+        let reloaded = load_or_init_config(&db_path).unwrap();
+        assert_eq!(reloaded, ServiceConfig::default());
     }
 
     #[test]
@@ -5099,7 +5079,7 @@ cache:
     async fn config_yaml_can_be_delegated_with_normal_auth_rules() {
         let state = test_state();
         let app = build_app(state.app_state());
-        let bootstrap_config = r#"
+        let delegated_config = r#"
 mounts:
   - mount_path: /
     type: quark_open
@@ -5117,22 +5097,22 @@ auth:
 cache:
   max_bytes: 1048576
 "#;
-        let bootstrap = app
+        let seed_response = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::PUT)
                     .uri("/api/config.yaml")
                     .header(header::AUTHORIZATION, "Bearer root-test-key")
-                    .body(Body::from(bootstrap_config))
+                    .body(Body::from(delegated_config))
                     .unwrap(),
             )
             .await
             .unwrap();
-        if bootstrap.status() != StatusCode::OK {
-            let status = bootstrap.status();
-            let body = response_text(bootstrap).await;
-            panic!("bootstrap status {status}: {body}");
+        if seed_response.status() != StatusCode::OK {
+            let status = seed_response.status();
+            let body = response_text(seed_response).await;
+            panic!("seed config status {status}: {body}");
         }
 
         let delegated_get = app
@@ -5155,7 +5135,7 @@ cache:
                     .method(Method::PUT)
                     .uri("/api/config.yaml")
                     .header(header::AUTHORIZATION, "Bearer config-editor-key")
-                    .body(Body::from(bootstrap_config))
+                    .body(Body::from(delegated_config))
                     .unwrap(),
             )
             .await
@@ -5422,18 +5402,6 @@ cache:
                     mount_type: "system_config".to_string(),
                     root_path: None,
                     options: Value::Null,
-                },
-                MountConfig {
-                    mount_path: "/release".to_string(),
-                    mount_type: "github_releases".to_string(),
-                    root_path: Some("hiddify/hiddify-app".to_string()),
-                    options: json!({"asset_allow": ["Hiddify-MacOS.dmg"]}),
-                },
-                MountConfig {
-                    mount_path: "/release".to_string(),
-                    mount_type: "github_releases".to_string(),
-                    root_path: Some("SagerNet/sing-box".to_string()),
-                    options: json!({"asset_allow": ["sing-box-*-linux-amd64.tar.gz"]}),
                 },
                 MountConfig {
                     mount_path: "/release/yacd-gh-pages.zip".to_string(),

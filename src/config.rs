@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{chrono_millis, mounts::normalize_virtual_path};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ServiceConfig {
     #[serde(default = "default_bucket")]
     pub(crate) s3_bucket: String,
@@ -25,7 +25,7 @@ pub(crate) struct ServiceConfig {
     pub(crate) cache: CacheConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MountConfig {
     pub(crate) mount_path: String,
     #[serde(rename = "type")]
@@ -36,7 +36,7 @@ pub(crate) struct MountConfig {
     pub(crate) options: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AuthConfig {
     #[serde(default)]
     pub(crate) keys: Vec<KeyConfig>,
@@ -44,7 +44,7 @@ pub(crate) struct AuthConfig {
     pub(crate) rules: Vec<AuthRule>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct KeyConfig {
     pub(crate) name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -57,14 +57,14 @@ pub(crate) struct KeyConfig {
     pub(crate) plain_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AuthRule {
     pub(crate) principal: String,
     pub(crate) actions: Vec<String>,
     pub(crate) resources: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CacheConfig {
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
@@ -145,10 +145,7 @@ pub(crate) fn mount_root_path(mount: &MountConfig) -> &str {
     mount.root_path.as_deref().unwrap_or("")
 }
 
-pub(crate) fn load_or_init_config(
-    db_path: &Path,
-    bootstrap_config_path: Option<&Path>,
-) -> Result<ServiceConfig> {
+pub(crate) fn load_or_init_config(db_path: &Path) -> Result<ServiceConfig> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -169,13 +166,7 @@ pub(crate) fn load_or_init_config(
         save_config_to_db(db_path, &config)?;
         return Ok(config);
     }
-    let config = if let Some(path) = bootstrap_config_path {
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("failed to read bootstrap config: {}", path.display()))?;
-        normalize_config(parse_config_yaml(&bytes)?)?
-    } else {
-        ServiceConfig::default()
-    };
+    let config = normalize_config(ServiceConfig::default())?;
     save_config_to_db(db_path, &config)?;
     Ok(config)
 }

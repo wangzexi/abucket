@@ -1,21 +1,21 @@
-use std::fs;
-use std::path::{Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use reqwest::{Client, Proxy, Url};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
-use serde_yaml::Value as YamlValue;
+use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{QuarkBackend, QuarkOpenClient, config};
+use crate::{QuarkBackend, QuarkOpenClient, chrono_millis, config};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct QuarkOpenConfig {
-    pub(crate) oauth_file: Option<PathBuf>,
     pub(crate) access_token: String,
     pub(crate) refresh_token: String,
     pub(crate) app_id: String,
     pub(crate) sign_key: String,
     pub(crate) refresh_url: String,
+    #[serde(default)]
     pub(crate) root_fid: String,
 }
 
@@ -45,7 +45,7 @@ pub(crate) struct S3Config {
 pub(crate) enum ResolvedMount {
     QuarkOpen {
         remote_key: String,
-        config: QuarkOpenConfig,
+        mount_path: String,
     },
     SystemConfig {
         virtual_path: String,
@@ -65,9 +65,11 @@ pub(crate) enum ResolvedMount {
     },
 }
 
-pub(crate) fn quark_open_client(config: QuarkOpenConfig) -> Result<QuarkOpenClient> {
+pub(crate) fn quark_open_client(db_path: &FsPath, mount_path: &str) -> Result<QuarkOpenClient> {
+    let config = load_private_state::<QuarkOpenConfig>(db_path, "quark_open", mount_path)?
+        .with_context(|| format!("quark_open mount {mount_path} needs OAuth state in SQLite"))?;
     if config.refresh_token.trim().is_empty() {
-        bail!("quark_open mount needs options.refresh_token or options.oauth_file");
+        bail!("quark_open mount {mount_path} needs refresh_token in SQLite");
     }
     let http = Client::builder()
         .user_agent("atree/quark-open")
@@ -76,6 +78,8 @@ pub(crate) fn quark_open_client(config: QuarkOpenConfig) -> Result<QuarkOpenClie
     Ok(QuarkOpenClient {
         http,
         config: std::sync::Arc::new(tokio::sync::Mutex::new(config)),
+        db_path: db_path.to_path_buf(),
+        mount_path: mount_path.to_string(),
     })
 }
 
@@ -118,7 +122,7 @@ pub(crate) fn resolve_mount(
             let rest = strip_mount_path(&mount.mount_path, &path);
             Some(ResolvedMount::QuarkOpen {
                 remote_key: join_remote_path(config::mount_root_path(mount), rest),
-                config: quark_open_config_from_options(&mount.options)?,
+                mount_path: mount.mount_path.clone(),
             })
         }
         "system_config" => Some(ResolvedMount::SystemConfig {
@@ -181,11 +185,17 @@ pub(crate) fn resolve_github_release_mounts(
         .collect()
 }
 
-pub(crate) fn backend_from_mount(mount: ResolvedMount) -> Option<(String, QuarkBackend)> {
+pub(crate) fn backend_from_mount(
+    db_path: &FsPath,
+    mount: ResolvedMount,
+) -> Option<(String, QuarkBackend)> {
     match mount {
-        ResolvedMount::QuarkOpen { remote_key, config } => Some((
+        ResolvedMount::QuarkOpen {
             remote_key,
-            QuarkBackend::Open(quark_open_client(config).ok()?),
+            mount_path,
+        } => Some((
+            remote_key,
+            QuarkBackend::Open(quark_open_client(db_path, &mount_path).ok()?),
         )),
         _ => None,
     }
@@ -278,58 +288,6 @@ fn s3_config_from_mount(mount: &config::MountConfig) -> Option<S3Config> {
     })
 }
 
-fn quark_open_config_from_options(options: &serde_json::Value) -> Option<QuarkOpenConfig> {
-    let oauth_file = mount_option_string(options, "oauth_file").map(PathBuf::from);
-    let oauth = oauth_file.as_deref().and_then(read_quark_open_oauth_file);
-    Some(QuarkOpenConfig {
-        oauth_file,
-        access_token: mount_option_string(options, "access_token")
-            .or_else(|| {
-                oauth
-                    .as_ref()
-                    .and_then(|value| yaml_string(value, &["tokens", "access_token"]))
-            })
-            .unwrap_or_default(),
-        refresh_token: mount_option_string(options, "refresh_token").or_else(|| {
-            oauth
-                .as_ref()
-                .and_then(|value| yaml_string(value, &["tokens", "refresh_token"]))
-        })?,
-        app_id: mount_option_string(options, "app_id")
-            .or_else(|| {
-                oauth
-                    .as_ref()
-                    .and_then(|value| yaml_string(value, &["app_id"]))
-            })
-            .or_else(|| {
-                oauth
-                    .as_ref()
-                    .and_then(|value| yaml_string(value, &["application", "client_id"]))
-            })
-            .unwrap_or_default(),
-        sign_key: mount_option_string(options, "sign_key")
-            .or_else(|| {
-                oauth
-                    .as_ref()
-                    .and_then(|value| yaml_string(value, &["sign_key"]))
-            })
-            .or_else(|| {
-                oauth
-                    .as_ref()
-                    .and_then(|value| yaml_string(value, &["application", "sign_key"]))
-            })
-            .unwrap_or_default(),
-        refresh_url: mount_option_string(options, "refresh_url")
-            .or_else(|| {
-                oauth
-                    .as_ref()
-                    .and_then(|value| yaml_string(value, &["source", "refresh_url"]))
-            })
-            .unwrap_or_else(|| "https://api.oplist.org/quarkyun/renewapi".to_string()),
-        root_fid: "0".to_string(),
-    })
-}
-
 pub(crate) fn is_fnnas_quark_refresh_url(refresh_url: &str) -> bool {
     let Ok(url) = Url::parse(refresh_url) else {
         return false;
@@ -337,63 +295,58 @@ pub(crate) fn is_fnnas_quark_refresh_url(refresh_url: &str) -> bool {
     matches!(url.host_str(), Some("oauth.fnnas.com")) && url.path() == "/api/v1/oauth/refreshToken"
 }
 
-pub(crate) fn read_quark_open_oauth_file(path: &FsPath) -> Option<YamlValue> {
-    let bytes = fs::read(path).ok()?;
-    serde_yaml::from_slice(&bytes).ok()
+pub(crate) fn save_quark_open_config(
+    db_path: &FsPath,
+    mount_path: &str,
+    config: &QuarkOpenConfig,
+) -> Result<()> {
+    save_private_state(db_path, "quark_open", mount_path, config)
 }
 
-pub(crate) fn persist_quark_open_config(config: &QuarkOpenConfig) -> Result<()> {
-    let Some(path) = &config.oauth_file else {
-        return Ok(());
-    };
-    let mut value =
-        read_quark_open_oauth_file(path).unwrap_or(YamlValue::Mapping(Default::default()));
-    set_yaml_string(
-        &mut value,
-        &["tokens", "access_token"],
-        &config.access_token,
-    );
-    set_yaml_string(
-        &mut value,
-        &["tokens", "refresh_token"],
-        &config.refresh_token,
-    );
-    if !config.app_id.is_empty() {
-        set_yaml_string(&mut value, &["application", "client_id"], &config.app_id);
-        set_yaml_string(&mut value, &["app_id"], &config.app_id);
-    }
-    if !config.sign_key.is_empty() {
-        set_yaml_string(&mut value, &["application", "sign_key"], &config.sign_key);
-        set_yaml_string(&mut value, &["sign_key"], &config.sign_key);
-    }
-    fs::write(path, serde_yaml::to_string(&value)?)?;
+fn load_private_state<T>(db_path: &FsPath, namespace: &str, name: &str) -> Result<Option<T>>
+where
+    T: DeserializeOwned,
+{
+    let conn = Connection::open(db_path)?;
+    ensure_private_state_table(&conn)?;
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT json FROM private_state WHERE namespace = ?1 AND name = ?2",
+            params![namespace, name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    raw.map(|value| serde_json::from_str(&value).context("invalid private state json"))
+        .transpose()
+}
+
+fn save_private_state<T>(db_path: &FsPath, namespace: &str, name: &str, state: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let conn = Connection::open(db_path)?;
+    ensure_private_state_table(&conn)?;
+    let raw = serde_json::to_string_pretty(state)?;
+    conn.execute(
+        "INSERT INTO private_state (namespace, name, json, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(namespace, name) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at",
+        params![namespace, name, raw, chrono_millis()],
+    )?;
     Ok(())
 }
 
-fn yaml_string(value: &YamlValue, path: &[&str]) -> Option<String> {
-    let mut current = value;
-    for key in path {
-        current = current.get(YamlValue::String((*key).to_string()))?;
-    }
-    current.as_str().map(ToString::to_string)
-}
-
-fn set_yaml_string(value: &mut YamlValue, path: &[&str], new_value: &str) {
-    if path.is_empty() {
-        *value = YamlValue::String(new_value.to_string());
-        return;
-    }
-    if !value.is_mapping() {
-        *value = YamlValue::Mapping(Default::default());
-    }
-    let mapping = value
-        .as_mapping_mut()
-        .expect("mapping was just initialized");
-    let key = YamlValue::String(path[0].to_string());
-    let entry = mapping
-        .entry(key)
-        .or_insert_with(|| YamlValue::Mapping(Default::default()));
-    set_yaml_string(entry, &path[1..], new_value);
+fn ensure_private_state_table(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS private_state (
+            namespace TEXT NOT NULL,
+            name TEXT NOT NULL,
+            json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (namespace, name)
+        )",
+        [],
+    )?;
+    Ok(())
 }
 
 fn mount_matches_for_type(mount: &config::MountConfig, path: &str) -> bool {

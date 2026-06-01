@@ -52,57 +52,7 @@ curl -X PUT \
   'http://127.0.0.1:9000/api/config.yaml'
 ```
 
-最小配置：
-
-```yaml
-s3_bucket: atree
-mounts:
-  - mount_path: /api/config.yaml
-    type: system_config
-auth:
-  keys:
-    - name: admin
-      plain_key: replace-with-admin-key
-  rules:
-    - principal: key:admin
-      actions: [ListBucket, HeadObject, GetObject, PutObject, DeleteObject]
-      resources: [/*]
-```
-
-## Mount 示例
-
-```yaml
-mounts:
-  - mount_path: /quark
-    type: quark_open
-    root_path: /
-    options:
-      refresh_url: https://api.oplist.org/quarkyun/renewapi
-      refresh_token: '<private refresh token>'
-      access_token: '<optional current access token>'
-      app_id: '<private app id>'
-      sign_key: '<private sign key>'
-
-  - mount_path: /client
-    type: github_releases
-    root_path: OpenListTeam/OpenList
-    options:
-      show_source_code: true
-      asset_allow: [openlist-*.tar.gz]
-
-  - mount_path: /downloads
-    type: url_tree
-    root_path: https://github.com/OpenListTeam/OpenList/releases/latest/download
-
-  - mount_path: /files
-    type: s3
-    root_path: /
-    options:
-      endpoint: http://minio.minio.svc.cluster.local:9000
-      bucket: files
-      access_key: '<private access key>'
-      secret_key: '<private secret key>'
-```
+配置注释由代码生成：看 `src/config.rs` 的 `config_yaml_comments()` 和 `validate_config()`。mount 支持类型在 `src/mounts.rs`。
 
 OpenList QuarkOpen 默认刷新接口是 `https://api.oplist.org/quarkyun/renewapi`。如果需要让 atree 获取 `app_id/sign_key`，看 `docs/oauth-notes.md`。
 

@@ -58,10 +58,10 @@ auth:
   rules:
     - principal: root
       actions: [ListBucket, HeadObject, GetObject, PutObject, DeleteObject]
-      resources: [/*]
-    - principal: anonymous
-      actions: [ListBucket, HeadObject, GetObject]
       resources: [/, /*]
+    - principal: anonymous
+      actions: [ListBucket]
+      resources: [/]
 cache:
   enabled: true
   ttl_seconds: 600

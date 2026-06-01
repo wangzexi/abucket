@@ -15,16 +15,6 @@ rg -n "quark_open|github_releases|system_config|ListBucket|PutObject" src docs
 cargo test --quiet
 ```
 
-## 本地运行
-
-```bash
-export ATREE_ROOT_KEY='replace-with-root-key'
-export BIND='127.0.0.1:9000'
-cargo run
-```
-
-环境变量看代码：`ATREE_ROOT_KEY`、`ATREE_DB`、`ATREE_MULTIPART_DIR`、`ATREE_CACHE_DIR`、`BIND`。
-
 ## Docker
 
 ```bash

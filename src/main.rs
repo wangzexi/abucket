@@ -1509,7 +1509,7 @@ async fn list_objects(
             let synthetic_listing =
                 synthetic_mount_listing(&config, &principal, &prefix, delimiter.as_deref());
             let hidden_listing_identities =
-                hidden_mount_identities(&config, &prefix, delimiter.as_deref());
+                hidden_mount_identities(&config, &principal, &prefix, delimiter.as_deref());
             drop(config);
             return list_s3_mount(
                 &state,
@@ -1710,6 +1710,7 @@ fn synthetic_mount_listing(
 
 fn hidden_mount_identities(
     config: &ServiceConfig,
+    principal: &str,
     prefix: &str,
     delimiter: Option<&str>,
 ) -> HashSet<String> {
@@ -1720,7 +1721,16 @@ fn hidden_mount_identities(
     config
         .mounts
         .iter()
-        .filter(|mount| mount.mount_path != "/" && mount_hidden_from_parent(mount))
+        .filter(|mount| {
+            if mount.mount_path == "/" {
+                return false;
+            }
+            if mount_hidden_from_parent(mount) {
+                return true;
+            }
+            let resource = normalize_tree_path(&mount.mount_path);
+            !policy_allows(config, principal, "ListBucket", &resource)
+        })
         .filter_map(|mount| {
             let normalized = normalize_tree_path(&mount.mount_path);
             let rest = if current == "/" {
@@ -5558,13 +5568,60 @@ cache:
 
         let (_, root_prefixes) = synthetic_mount_listing(&config, "anonymous", "", Some("/"));
         assert!(!root_prefixes.contains(&"tmp/".to_string()));
-        assert!(hidden_mount_identities(&config, "", Some("/")).contains("tmp"));
-        assert!(hidden_mount_identities(&config, "tmp/", Some("/")).is_empty());
+        assert!(hidden_mount_identities(&config, "anonymous", "", Some("/")).contains("tmp"));
+        assert!(hidden_mount_identities(&config, "anonymous", "tmp/", Some("/")).is_empty());
 
         let (tmp_entries, tmp_prefixes) =
             synthetic_mount_listing(&config, "anonymous", "tmp/", Some("/"));
         assert!(tmp_entries.is_empty());
         assert!(tmp_prefixes.is_empty());
+    }
+
+    #[test]
+    fn unauthorized_mount_is_suppressed_from_parent_s3_listing() {
+        let config = ServiceConfig {
+            s3_bucket: "atree".to_string(),
+            mounts: vec![
+                MountConfig {
+                    mount_path: "/".to_string(),
+                    mount_type: "s3".to_string(),
+                    root_path: Some("/".to_string()),
+                    options: json!({
+                        "endpoint": "http://minio.local:9000",
+                        "bucket": "file",
+                        "access_key": "key",
+                        "secret_key": "secret"
+                    }),
+                },
+                MountConfig {
+                    mount_path: "/quark".to_string(),
+                    mount_type: "quark_open".to_string(),
+                    root_path: Some("/".to_string()),
+                    options: json!({
+                        "refresh_token": "refresh"
+                    }),
+                },
+                MountConfig {
+                    mount_path: "/external".to_string(),
+                    mount_type: "github_releases".to_string(),
+                    root_path: Some("example/repo".to_string()),
+                    options: Value::Null,
+                },
+            ],
+            auth: AuthConfig {
+                keys: Vec::new(),
+                rules: vec![AuthRule {
+                    principal: "anonymous".to_string(),
+                    actions: vec!["ListBucket".to_string()],
+                    resources: vec!["/".to_string(), "/external".to_string()],
+                }],
+            },
+            cache: CacheConfig::default(),
+        };
+
+        let hidden = hidden_mount_identities(&config, "anonymous", "", Some("/"));
+        assert!(hidden.contains("quark"));
+        assert!(!hidden.contains("external"));
     }
 
     #[test]

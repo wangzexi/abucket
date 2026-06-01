@@ -54,7 +54,7 @@ pub(crate) fn resolve_mount(
         .find(|mount| mount_matches_for_type(mount, &path))?;
     match mount.mount_type.as_str() {
         "quark_open" => {
-            let rest = strip_mount_path(&mount.path, &path);
+            let rest = strip_base_path(&mount.path, &path);
             Some(ResolvedMount::QuarkOpen {
                 remote_key: join_remote_path(config::mount_root_path(mount), rest),
                 config: quark_open::from_mount(mount)?,
@@ -65,7 +65,7 @@ pub(crate) fn resolve_mount(
             virtual_path: path.to_string(),
         }),
         "url_tree" => {
-            let rest = strip_mount_path(&mount.path, &path);
+            let rest = strip_base_path(&mount.path, &path);
             let target = url_tree::target_from_mount(mount, rest)?;
             Some(ResolvedMount::UrlTree {
                 url: target.url,
@@ -74,14 +74,14 @@ pub(crate) fn resolve_mount(
             })
         }
         "github_releases" => {
-            let rest = strip_mount_path(&mount.path, &path);
+            let rest = strip_base_path(&mount.path, &path);
             Some(ResolvedMount::GithubReleases {
                 rest: rest.to_string(),
                 config: github_releases::from_mount(mount)?,
             })
         }
         "s3" => {
-            let rest = strip_mount_path(&mount.path, &path);
+            let rest = strip_base_path(&mount.path, &path);
             Some(ResolvedMount::S3 {
                 remote_key: join_remote_path(config::mount_root_path(mount), rest),
                 config: s3::from_mount(mount)?,
@@ -113,7 +113,7 @@ pub(crate) fn resolve_github_release_mounts(
         .filter(|mount| normalize_virtual_path(&mount.path).len() == best_len)
         .filter_map(|mount| {
             Some((
-                strip_mount_path(&mount.path, &path).to_string(),
+                strip_base_path(&mount.path, &path).to_string(),
                 github_releases::from_mount(mount)?,
             ))
         })
@@ -153,7 +153,7 @@ fn mount_matches(base_path: &str, path: &str) -> bool {
     path == base_path || path.starts_with(&format!("{base_path}/"))
 }
 
-fn strip_mount_path<'a>(base_path: &str, path: &'a str) -> &'a str {
+fn strip_base_path<'a>(base_path: &str, path: &'a str) -> &'a str {
     let base_path = normalize_virtual_path(base_path);
     if base_path == "/" {
         return path.trim_start_matches('/');

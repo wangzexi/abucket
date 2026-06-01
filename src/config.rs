@@ -15,41 +15,27 @@ use crate::{chrono_millis, mounts::normalize_virtual_path};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ServiceConfig {
-    #[serde(rename = "bucket", alias = "s3_bucket")]
     #[serde(default = "default_bucket")]
-    pub(crate) s3_bucket: String,
+    pub(crate) bucket: String,
     #[serde(default = "default_mounts")]
     pub(crate) mounts: Vec<MountConfig>,
-    #[serde(rename = "users", alias = "keys")]
     #[serde(default)]
     pub(crate) users: Vec<KeyConfig>,
     #[serde(default)]
     pub(crate) rules: Vec<AuthRule>,
     #[serde(default)]
     pub(crate) cache: CacheConfig,
-    #[serde(default, rename = "auth", skip_serializing)]
-    pub(crate) legacy_auth: AuthConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MountConfig {
     #[serde(rename = "type")]
     pub(crate) mount_type: String,
-    #[serde(rename = "path", alias = "mount_path")]
     pub(crate) path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) root_path: Option<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub(crate) options: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct AuthConfig {
-    #[serde(rename = "users", alias = "keys")]
-    #[serde(default)]
-    pub(crate) keys: Vec<KeyConfig>,
-    #[serde(default)]
-    pub(crate) rules: Vec<AuthRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,17 +47,14 @@ pub(crate) struct KeyConfig {
     pub(crate) key_hint: String,
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
-    #[serde(rename = "key", alias = "plain_key")]
     #[serde(default, skip_serializing)]
-    pub(crate) plain_key: Option<String>,
+    pub(crate) key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AuthRule {
-    #[serde(rename = "user", alias = "principal")]
-    pub(crate) principal: String,
-    #[serde(rename = "paths", alias = "resources")]
-    pub(crate) resources: Vec<String>,
+    pub(crate) user: String,
+    pub(crate) paths: Vec<String>,
     pub(crate) actions: Vec<String>,
 }
 
@@ -88,12 +71,11 @@ pub(crate) struct CacheConfig {
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
-            s3_bucket: default_bucket(),
+            bucket: default_bucket(),
             mounts: default_mounts(),
             users: Vec::new(),
             rules: Vec::new(),
             cache: CacheConfig::default(),
-            legacy_auth: AuthConfig::default(),
         }
     }
 }
@@ -104,15 +86,6 @@ impl Default for CacheConfig {
             enabled: true,
             ttl_seconds: default_cache_ttl_seconds(),
             max_bytes: default_cache_max_bytes(),
-        }
-    }
-}
-
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            keys: Vec::new(),
-            rules: Vec::new(),
         }
     }
 }
@@ -196,31 +169,18 @@ pub(crate) fn save_config_to_db(db_path: &Path, config: &ServiceConfig) -> Resul
 }
 
 pub(crate) fn normalize_config(mut config: ServiceConfig) -> Result<ServiceConfig> {
-    if config.users.is_empty() {
-        config.users = std::mem::take(&mut config.legacy_auth.keys);
-    }
-    if config.rules.is_empty() {
-        config.rules = std::mem::take(&mut config.legacy_auth.rules);
-    }
-    config.legacy_auth = AuthConfig::default();
-
     for mount in &mut config.mounts {
         if mount.mount_type == "system_config" {
             mount.root_path = None;
         }
     }
-    for key in &mut config.users {
-        if let Some(plain) = key.plain_key.take() {
+    for user in &mut config.users {
+        if let Some(plain) = user.key.take() {
             if plain.len() < 8 {
-                bail!("key for user '{}' must be at least 8 characters", key.name);
+                bail!("key for user '{}' must be at least 8 characters", user.name);
             }
-            key.key_hash = hash_key(&plain);
-            key.key_hint = key_hint(&plain);
-        }
-    }
-    for rule in &mut config.rules {
-        if let Some(name) = rule.principal.strip_prefix("key:") {
-            rule.principal = name.to_string();
+            user.key_hash = hash_key(&plain);
+            user.key_hint = key_hint(&plain);
         }
     }
     validate_config(&config)?;
@@ -313,7 +273,7 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 }
 
 pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
-    validate_bucket(&config.s3_bucket)?;
+    validate_bucket(&config.bucket)?;
     if config.mounts.is_empty() {
         bail!("config.mounts must contain at least one mount");
     }
@@ -529,14 +489,10 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
     }
 
     for rule in &config.rules {
-        let user = rule
-            .principal
-            .strip_prefix("key:")
-            .unwrap_or(&rule.principal);
-        if user != "anonymous" && user != "root" && !names.contains(user) {
-            bail!("rule references missing user '{}'", user);
+        if rule.user != "anonymous" && rule.user != "root" && !names.contains(&rule.user) {
+            bail!("rule references missing user '{}'", rule.user);
         }
-        if rule.actions.is_empty() || rule.resources.is_empty() {
+        if rule.actions.is_empty() || rule.paths.is_empty() {
             bail!("rules need non-empty actions and paths");
         }
         for action in &rule.actions {
@@ -549,7 +505,7 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                 bail!("unsupported action '{}'", action);
             }
         }
-        for path in &rule.resources {
+        for path in &rule.paths {
             if path != "*" && !path.starts_with('/') {
                 bail!("path '{}' must start with / or be *", path);
             }

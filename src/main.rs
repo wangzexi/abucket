@@ -915,7 +915,7 @@ fn cache_dir_path() -> PathBuf {
 }
 
 async fn state_bucket(state: &AppState) -> String {
-    state.config.read().await.s3_bucket.clone()
+    state.config.read().await.bucket.clone()
 }
 
 async fn state_config_path(state: &AppState) -> String {
@@ -1413,9 +1413,9 @@ async fn list_objects(
         prefix.clone()
     };
 
-    let principal = resolve_principal(&state, headers).await;
+    let user = resolve_user(&state, headers).await;
     let config = state.config.read().await;
-    if !policy_allows(&config, &principal, "ListBucket", &virtual_prefix) {
+    if !policy_allows(&config, &user, "ListBucket", &virtual_prefix) {
         drop(config);
         return access_denied_response(&state, headers, &bucket).await;
     }
@@ -1423,7 +1423,7 @@ async fn list_objects(
 
     let list_cache_key = tree_list_cache_key(
         &bucket,
-        &principal,
+        &user,
         &virtual_prefix,
         &prefix,
         delimiter.as_deref(),
@@ -1442,7 +1442,7 @@ async fn list_objects(
             .all(|(rest, _)| rest.trim_matches('/').is_empty())
     {
         let (synthetic_entries, synthetic_prefixes) =
-            synthetic_mount_listing(&config, &principal, &prefix, delimiter.as_deref());
+            synthetic_mount_listing(&config, &user, &prefix, delimiter.as_deref());
         drop(config);
         return list_github_releases_many(
             &state,
@@ -1510,9 +1510,9 @@ async fn list_objects(
             config: s3_config,
         }) => {
             let synthetic_listing =
-                synthetic_mount_listing(&config, &principal, &prefix, delimiter.as_deref());
+                synthetic_mount_listing(&config, &user, &prefix, delimiter.as_deref());
             let hidden_listing_identities =
-                hidden_mount_identities(&config, &principal, &prefix, delimiter.as_deref());
+                hidden_mount_identities(&config, &user, &prefix, delimiter.as_deref());
             drop(config);
             return list_s3_mount(
                 &state,
@@ -1533,7 +1533,7 @@ async fn list_objects(
         }
         None => {
             let (entries, common_prefixes) =
-                synthetic_mount_listing(&config, &principal, &prefix, delimiter.as_deref());
+                synthetic_mount_listing(&config, &user, &prefix, delimiter.as_deref());
             if !entries.is_empty() || !common_prefixes.is_empty() {
                 drop(config);
                 let xml = list_xml_string(
@@ -1651,7 +1651,7 @@ async fn list_objects(
 
 fn synthetic_mount_listing(
     config: &ServiceConfig,
-    principal: &str,
+    user: &str,
     prefix: &str,
     delimiter: Option<&str>,
 ) -> (Vec<S3Entry>, Vec<String>) {
@@ -1691,7 +1691,7 @@ fn synthetic_mount_listing(
             format!("{}/{}", current.trim_start_matches('/'), first)
         };
         let resource = format!("/{}", key.trim_matches('/'));
-        if !policy_allows(config, principal, "ListBucket", &resource) {
+        if !policy_allows(config, user, "ListBucket", &resource) {
             continue;
         }
         if !seen.insert(key.clone()) {
@@ -1713,7 +1713,7 @@ fn synthetic_mount_listing(
 
 fn hidden_mount_identities(
     config: &ServiceConfig,
-    principal: &str,
+    user: &str,
     prefix: &str,
     delimiter: Option<&str>,
 ) -> HashSet<String> {
@@ -1732,7 +1732,7 @@ fn hidden_mount_identities(
                 return true;
             }
             let resource = normalize_tree_path(&mount.path);
-            !policy_allows(config, principal, "ListBucket", &resource)
+            !policy_allows(config, user, "ListBucket", &resource)
         })
         .filter_map(|mount| {
             let normalized = normalize_tree_path(&mount.path);
@@ -2596,7 +2596,7 @@ where
 
 fn tree_list_cache_key(
     bucket: &str,
-    principal: &str,
+    user: &str,
     resource: &str,
     prefix: &str,
     delimiter: Option<&str>,
@@ -2604,7 +2604,7 @@ fn tree_list_cache_key(
     offset: usize,
 ) -> String {
     format!(
-        "/.atree/cache/tree/ListBucket/bucket={bucket}/principal={principal}/resource={resource}/prefix={prefix}/delimiter={}/max={max_keys}/offset={offset}",
+        "/.atree/cache/tree/ListBucket/bucket={bucket}/user={user}/resource={resource}/prefix={prefix}/delimiter={}/max={max_keys}/offset={offset}",
         delimiter.unwrap_or("")
     )
 }
@@ -3624,12 +3624,12 @@ async fn is_authorized(
     action: &str,
     resource: &str,
 ) -> bool {
-    let principal = resolve_principal(state, headers).await;
+    let user = resolve_user(state, headers).await;
     let config = state.config.read().await;
-    policy_allows(&config, &principal, action, resource)
+    policy_allows(&config, &user, action, resource)
 }
 
-async fn resolve_principal(state: &AppState, headers: &HeaderMap) -> String {
+async fn resolve_user(state: &AppState, headers: &HeaderMap) -> String {
     let Some(token) = request_access_key(headers) else {
         return "anonymous".to_string();
     };
@@ -3646,21 +3646,18 @@ async fn resolve_principal(state: &AppState, headers: &HeaderMap) -> String {
         .unwrap_or_else(|| "anonymous".to_string())
 }
 
-fn policy_allows(config: &ServiceConfig, principal: &str, action: &str, resource: &str) -> bool {
-    if principal == "root" {
+fn policy_allows(config: &ServiceConfig, user: &str, action: &str, resource: &str) -> bool {
+    if user == "root" {
         return true;
     }
     config.rules.iter().any(|rule| {
-        rule.principal
-            .strip_prefix("key:")
-            .unwrap_or(&rule.principal)
-            == principal
+        rule.user == user
             && rule
                 .actions
                 .iter()
                 .any(|candidate| candidate == "*" || candidate == action)
             && rule
-                .resources
+                .paths
                 .iter()
                 .any(|candidate| resource_matches(candidate, resource))
     })
@@ -4155,7 +4152,7 @@ fn xml_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::{
-        AuthConfig, AuthRule, CacheConfig, KeyConfig, MountConfig, default_mounts, validate_config,
+        AuthRule, CacheConfig, KeyConfig, MountConfig, default_mounts, validate_config,
     };
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
@@ -4225,11 +4222,10 @@ mod tests {
 
     fn config_with_mounts(mounts: Vec<MountConfig>) -> ServiceConfig {
         ServiceConfig {
-            s3_bucket: "atree".to_string(),
+            bucket: "atree".to_string(),
             mounts,
             users: Vec::new(),
             rules: Vec::new(),
-            legacy_auth: AuthConfig::default(),
             cache: CacheConfig::default(),
         }
     }
@@ -4594,9 +4590,9 @@ mod tests {
             "/public/a.txt"
         ));
         config.rules.push(AuthRule {
-            principal: "anonymous".to_string(),
+            user: "anonymous".to_string(),
             actions: vec!["GetObject".to_string(), "HeadObject".to_string()],
-            resources: vec!["/public/*".to_string()],
+            paths: vec!["/public/*".to_string()],
         });
         assert!(policy_allows(
             &config,
@@ -4634,22 +4630,21 @@ mod tests {
     #[test]
     fn key_is_hashed_and_not_serialized() {
         let config = ServiceConfig {
-            s3_bucket: "atree".to_string(),
+            bucket: "atree".to_string(),
             mounts: default_mounts(),
             users: vec![KeyConfig {
                 name: "reader".to_string(),
                 key_hash: String::new(),
                 key_hint: String::new(),
                 enabled: true,
-                plain_key: Some("reader-secret".to_string()),
+                key: Some("reader-secret".to_string()),
             }],
             rules: vec![AuthRule {
-                principal: "reader".to_string(),
+                user: "reader".to_string(),
                 actions: vec!["ListBucket".to_string()],
-                resources: vec!["/*".to_string()],
+                paths: vec!["/*".to_string()],
             }],
             cache: CacheConfig::default(),
-            legacy_auth: AuthConfig::default(),
         };
         let config = normalize_config(config).expect("valid config");
         let key = &config.users[0];
@@ -4658,43 +4653,6 @@ mod tests {
         let raw = serde_json::to_string(&config).unwrap();
         assert!(!raw.contains("reader-secret"));
         assert!(!raw.contains("\"key\""));
-    }
-
-    #[test]
-    fn legacy_config_names_are_normalized() {
-        let config = parse_config_yaml(
-            br#"
-s3_bucket: legacy
-mounts:
-  - mount_path: /api/config.yaml
-    type: system_config
-auth:
-  keys:
-    - name: reader
-      plain_key: reader-secret
-  rules:
-    - principal: key:reader
-      actions: [ListBucket]
-      resources: [/*]
-"#,
-        )
-        .and_then(normalize_config)
-        .expect("legacy auth config remains valid");
-
-        assert_eq!(config.rules[0].principal, "reader");
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        assert!(yaml.contains("bucket: legacy"));
-        assert!(!yaml.contains("s3_bucket:"));
-        assert!(yaml.contains("type: system_config\n  path: /api/config.yaml"));
-        assert!(!yaml.contains("mount_path:"));
-        assert!(yaml.contains("users:"));
-        assert!(yaml.contains("user: reader"));
-        assert!(yaml.contains("paths:"));
-        assert!(!yaml.contains("auth:"));
-        assert!(!yaml.contains("plain_key:"));
-        assert!(!yaml.contains("principal:"));
-        assert!(!yaml.contains("resources:"));
-        assert!(!yaml.contains("key:reader"));
     }
 
     #[test]
@@ -4716,9 +4674,9 @@ auth:
 
         let mut config = ServiceConfig::default();
         config.rules.push(AuthRule {
-            principal: "key:missing".to_string(),
+            user: "missing".to_string(),
             actions: vec!["GetObject".to_string()],
-            resources: vec!["/*".to_string()],
+            paths: vec!["/*".to_string()],
         });
         assert!(validate_config(&config).is_err());
 
@@ -4799,7 +4757,7 @@ auth:
     }
 
     #[tokio::test]
-    async fn s3_bucket_root_supports_create_head_and_location() {
+    async fn bucket_root_supports_create_head_and_location() {
         let state = test_state();
         let app = build_app(state.app_state());
 
@@ -4957,9 +4915,9 @@ auth:
             },
         ]);
         config.rules.push(AuthRule {
-            principal: "anonymous".to_string(),
+            user: "anonymous".to_string(),
             actions: vec!["GetObject".to_string()],
-            resources: vec!["/public/site/index.html".to_string()],
+            paths: vec!["/public/site/index.html".to_string()],
         });
         *state.config.write().await = config;
         write_cached_object(
@@ -5341,7 +5299,7 @@ cache:
 
         let state = test_state();
         *state.config.write().await = ServiceConfig {
-            s3_bucket: "quark".to_string(),
+            bucket: "quark".to_string(),
             mounts: vec![
                 MountConfig {
                     path: "/".to_string(),
@@ -5364,12 +5322,11 @@ cache:
             ],
             users: Vec::new(),
             rules: vec![AuthRule {
-                principal: "anonymous".to_string(),
+                user: "anonymous".to_string(),
                 actions: vec!["GetObject".to_string(), "HeadObject".to_string()],
-                resources: vec!["/github/*".to_string()],
+                paths: vec!["/github/*".to_string()],
             }],
             cache: CacheConfig::default(),
-            legacy_auth: AuthConfig::default(),
         };
         let app = build_app(state.app_state());
 
@@ -5407,7 +5364,7 @@ cache:
     async fn json_config_route_is_not_exposed() {
         let state = test_state();
         *state.config.write().await = ServiceConfig {
-            s3_bucket: "atree".to_string(),
+            bucket: "atree".to_string(),
             mounts: vec![MountConfig {
                 path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
@@ -5416,7 +5373,6 @@ cache:
             }],
             users: Vec::new(),
             rules: Vec::new(),
-            legacy_auth: AuthConfig::default(),
             cache: CacheConfig::default(),
         };
         let app = build_app(state.app_state());
@@ -5437,7 +5393,7 @@ cache:
     async fn help_route_is_not_supported() {
         let state = test_state();
         *state.config.write().await = ServiceConfig {
-            s3_bucket: "atree".to_string(),
+            bucket: "atree".to_string(),
             mounts: vec![MountConfig {
                 path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
@@ -5446,7 +5402,6 @@ cache:
             }],
             users: Vec::new(),
             rules: Vec::new(),
-            legacy_auth: AuthConfig::default(),
             cache: CacheConfig::default(),
         };
         let app = build_app(state.app_state());
@@ -5503,7 +5458,7 @@ cache:
     async fn s3_root_list_includes_synthetic_mount_directories() {
         let state = test_state();
         *state.config.write().await = ServiceConfig {
-            s3_bucket: "atree".to_string(),
+            bucket: "atree".to_string(),
             mounts: vec![
                 MountConfig {
                     path: "/api/config.yaml".to_string(),
@@ -5522,16 +5477,15 @@ cache:
             ],
             users: Vec::new(),
             rules: vec![AuthRule {
-                principal: "anonymous".to_string(),
+                user: "anonymous".to_string(),
                 actions: vec!["ListBucket".to_string()],
-                resources: vec![
+                paths: vec![
                     "/".to_string(),
                     "/release".to_string(),
                     "/release/*".to_string(),
                 ],
             }],
             cache: CacheConfig::default(),
-            legacy_auth: AuthConfig::default(),
         };
         let app = build_app(state.app_state());
         let response = app
@@ -5571,7 +5525,7 @@ cache:
     #[test]
     fn hide_from_parent_suppresses_mount_in_parent_listing_only() {
         let config = ServiceConfig {
-            s3_bucket: "atree".to_string(),
+            bucket: "atree".to_string(),
             mounts: vec![
                 MountConfig {
                     path: "/api/config.yaml".to_string(),
@@ -5594,12 +5548,11 @@ cache:
             ],
             users: Vec::new(),
             rules: vec![AuthRule {
-                principal: "anonymous".to_string(),
+                user: "anonymous".to_string(),
                 actions: vec!["ListBucket".to_string()],
-                resources: vec!["/".to_string(), "/tmp".to_string(), "/tmp/*".to_string()],
+                paths: vec!["/".to_string(), "/tmp".to_string(), "/tmp/*".to_string()],
             }],
             cache: CacheConfig::default(),
-            legacy_auth: AuthConfig::default(),
         };
 
         let (_, root_prefixes) = synthetic_mount_listing(&config, "anonymous", "", Some("/"));
@@ -5616,7 +5569,7 @@ cache:
     #[test]
     fn unauthorized_mount_is_suppressed_from_parent_s3_listing() {
         let config = ServiceConfig {
-            s3_bucket: "atree".to_string(),
+            bucket: "atree".to_string(),
             mounts: vec![
                 MountConfig {
                     path: "/".to_string(),
@@ -5646,12 +5599,11 @@ cache:
             ],
             users: Vec::new(),
             rules: vec![AuthRule {
-                principal: "anonymous".to_string(),
+                user: "anonymous".to_string(),
                 actions: vec!["ListBucket".to_string()],
-                resources: vec!["/".to_string(), "/external".to_string()],
+                paths: vec!["/".to_string(), "/external".to_string()],
             }],
             cache: CacheConfig::default(),
-            legacy_auth: AuthConfig::default(),
         };
 
         let hidden = hidden_mount_identities(&config, "anonymous", "", Some("/"));

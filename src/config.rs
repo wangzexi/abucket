@@ -15,6 +15,7 @@ use crate::{chrono_millis, mounts::normalize_virtual_path};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ServiceConfig {
+    #[serde(rename = "bucket", alias = "s3_bucket")]
     #[serde(default = "default_bucket")]
     pub(crate) s3_bucket: String,
     #[serde(default = "default_mounts")]
@@ -249,7 +250,7 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # This is the live service config. Comments are ignored on PUT.
 # If ATREE_ROOT_KEY is set, that key is treated as user `root`.
 #
-# s3_bucket: path-style S3 bucket name used by clients. Default: atree.
+# bucket: path-style S3 bucket name used by clients. Default: atree.
 # mounts: ordered mount table. Later mounts have higher priority.
 # mounts[].path: service path, must start with /. Example: /quark or /pub
 # mounts[].type: quark_open, system_config, url_tree, github_releases, or s3.
@@ -559,10 +560,10 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
 
 fn validate_bucket(bucket: &str) -> Result<()> {
     if bucket.trim().is_empty() {
-        bail!("s3_bucket cannot be empty");
+        bail!("bucket cannot be empty");
     }
     if bucket.contains('/') {
-        bail!("s3_bucket cannot contain /");
+        bail!("bucket cannot contain /");
     }
     Ok(())
 }

@@ -56,7 +56,7 @@ curl -X PUT \
 最小 `config.yaml` 骨架：
 
 ```yaml
-s3_bucket: atree
+bucket: atree
 mounts:
   - type: system_config
     path: /api/config.yaml

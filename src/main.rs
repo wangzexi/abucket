@@ -4664,6 +4664,7 @@ mod tests {
     fn legacy_config_names_are_normalized() {
         let config = parse_config_yaml(
             br#"
+s3_bucket: legacy
 mounts:
   - mount_path: /api/config.yaml
     type: system_config
@@ -4682,6 +4683,8 @@ auth:
 
         assert_eq!(config.rules[0].principal, "reader");
         let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(yaml.contains("bucket: legacy"));
+        assert!(!yaml.contains("s3_bucket:"));
         assert!(yaml.contains("type: system_config\n  path: /api/config.yaml"));
         assert!(!yaml.contains("mount_path:"));
         assert!(yaml.contains("users:"));

@@ -40,7 +40,7 @@ POST   /{key}?uploadId=<id>
 DELETE /{key}?uploadId=<id>
 ```
 
-For S3 path-style clients, the configured `s3_bucket` is just the bucket label for the same tree. A client request like `/atree/quark/file.txt` is normalized to the internal tree path `/quark/file.txt` when it is recognizably an S3 request. Human/browser paths can still use `/quark/file.txt` directly.
+For S3 path-style clients, the configured `bucket` is just the bucket label for the same tree. A client request like `/atree/quark/file.txt` is normalized to the internal tree path `/quark/file.txt` when it is recognizably an S3 request. Human/browser paths can still use `/quark/file.txt` directly.
 
 Config is not a separate API family. It is one mounted file in the same tree:
 
@@ -496,7 +496,7 @@ The root key should not be stored in the normal config or browser `localStorage`
 The effective config returned by `GET /api/config.yaml` can look like:
 
 ```yaml
-s3_bucket: atree
+bucket: atree
 mounts:
   - type: quark_open
     path: /quark

@@ -27,9 +27,10 @@ pub(crate) struct ServiceConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MountConfig {
-    pub(crate) mount_path: String,
     #[serde(rename = "type")]
     pub(crate) mount_type: String,
+    #[serde(rename = "path", alias = "mount_path")]
+    pub(crate) path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) root_path: Option<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -110,7 +111,7 @@ impl Default for AuthConfig {
 
 pub(crate) fn default_mounts() -> Vec<MountConfig> {
     vec![MountConfig {
-        mount_path: "/api/config.yaml".to_string(),
+        path: "/api/config.yaml".to_string(),
         mount_type: "system_config".to_string(),
         root_path: None,
         options: Value::Null,
@@ -235,13 +236,13 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 #
 # s3_bucket: path-style S3 bucket name used by clients. Default: atree.
 # mounts: ordered mount table. Later mounts have higher priority.
-# mounts[].mount_path: service path, must start with /. Example: /quark or /pub
+# mounts[].path: service path, must start with /. Example: /quark or /pub
 # mounts[].type: quark_open, system_config, url_tree, github_releases, or s3.
 # mounts[].root_path: only for mounts backed by a remote tree.
-#   quark_open: human-readable Quark path to expose at mount_path.
+#   quark_open: human-readable Quark path to expose at path.
 #   url_tree: upstream http(s) URL prefix. Read-only.
 #   github_releases: GitHub repo in owner/repo form. Read-only.
-#   system_config does not use root_path; mount_path is the config file path.
+#   system_config does not use root_path; path is the config file path.
 # Disable a mount by commenting it out of this YAML.
 # mounts[].options:
 #   quark_open.access_token/refresh_token/app_id/sign_key/refresh_url belong to that mount.
@@ -252,16 +253,16 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 #   github_releases.token: optional GitHub token for higher rate limits or private repos.
 #   github_releases.asset_allow: optional list of asset names or * globs.
 #   github_releases.show_source_code: optional boolean. Exposes GitHub's source zip/tarball links.
-#   Multiple github_releases mounts can share one mount_path to create a flat merged directory.
+#   Multiple github_releases mounts can share one path to create a flat merged directory.
 #   s3.endpoint/bucket/access_key/secret_key: required for S3-compatible mounts.
 #   s3.region: optional, default us-east-1. s3.path_style: optional, default true.
 #   s3.proxy: optional outbound proxy URL.
 #   hide_from_parent: optional boolean. Hides this mount only from its parent directory listing.
-#     Direct requests to mount_path still resolve normally and still use auth.rules.
+#     Direct requests to path still resolve normally and still use auth.rules.
 #     This is discoverability control, not a security boundary.
 #   use {{}} or null when unused.
 # system_config note:
-#   mount_path is one mounted file path, not a directory. Example: {config_path}
+#   path is one mounted file path, not a directory. Example: {config_path}
 #   if you move this path, auth.rules must target the new path; the old path will 404.
 #
 # auth.users: named users. Do not store plaintext keys here.
@@ -303,10 +304,10 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
     if config.cache.ttl_seconds == 0 {
         bail!("cache.ttl_seconds must be greater than 0");
     }
-    let mut mount_paths = HashMap::new();
+    let mut paths = HashMap::new();
     let mut has_system_config = false;
     for mount in &config.mounts {
-        validate_abs_path(&mount.mount_path, "mount_path")?;
+        validate_abs_path(&mount.path, "path")?;
         if !matches!(
             mount.mount_type.as_str(),
             "quark_open" | "system_config" | "url_tree" | "github_releases" | "s3"
@@ -409,8 +410,8 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                 if mount.root_path.is_some() {
                     bail!("system_config mounts do not use root_path");
                 }
-                if normalize_virtual_path(&mount.mount_path) == "/" {
-                    bail!("system_config mount_path must be a file path, not /");
+                if normalize_virtual_path(&mount.path) == "/" {
+                    bail!("system_config path must be a file path, not /");
                 }
             }
             "s3" => {
@@ -485,11 +486,10 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
         if mount.mount_type == "system_config" {
             has_system_config = true;
         }
-        if let Some(existing_type) =
-            mount_paths.insert(mount.mount_path.clone(), mount.mount_type.clone())
+        if let Some(existing_type) = paths.insert(mount.path.clone(), mount.mount_type.clone())
             && (existing_type != "github_releases" || mount.mount_type != "github_releases")
         {
-            bail!("duplicate mount_path '{}'", mount.mount_path);
+            bail!("duplicate path '{}'", mount.path);
         }
     }
     if !has_system_config {

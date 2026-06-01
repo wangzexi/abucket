@@ -52,8 +52,8 @@ curl -X PUT \
 ```yaml
 s3_bucket: atree
 mounts:
-  - mount_path: /api/config.yaml
-    type: system_config
+  - type: system_config
+    path: /api/config.yaml
 auth:
   users:
     - name: public

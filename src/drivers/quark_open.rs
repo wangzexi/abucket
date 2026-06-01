@@ -44,12 +44,12 @@ pub(crate) fn from_mount(mount: &config::MountConfig) -> Option<QuarkOpenConfig>
 
 pub(crate) fn client(
     config: QuarkOpenConfig,
-    mount_path: &str,
+    path: &str,
     db_path: PathBuf,
     service_config: Arc<RwLock<config::ServiceConfig>>,
 ) -> Result<QuarkOpenClient> {
     if config.refresh_token.trim().is_empty() {
-        bail!("quark_open mount {mount_path} needs options.refresh_token");
+        bail!("quark_open mount {path} needs options.refresh_token");
     }
     let http = Client::builder()
         .user_agent("atree/quark-open")
@@ -60,7 +60,7 @@ pub(crate) fn client(
         config: std::sync::Arc::new(tokio::sync::Mutex::new(config)),
         db_path,
         service_config,
-        mount_path: mount_path.to_string(),
+        path: path.to_string(),
     })
 }
 

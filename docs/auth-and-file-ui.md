@@ -292,13 +292,13 @@ A mount maps a path in this service to a path in some remote system.
 
 Fields:
 
-- `mount_path`: where the mount appears in this service
+- `path`: where the mount appears in this service
 - `type`: how to access the remote system, such as `quark_open`, `system_config`, `url_tree`, `github_releases`, or future `s3`
 - `root_path`: where this mount starts in the remote system. It is only present for mount types backed by a remote tree, not for `system_config`.
 - To disable a mount, comment it out of the YAML.
 - `options`: mount-specific settings, such as an outbound proxy for `url_tree` or `github_releases`
 
-`mount_path` is usually unique. Multiple `github_releases` mounts may share one `mount_path`; their latest release assets are merged into a single flat directory. A separate `name` field is not needed in the first version.
+`path` is usually unique. Multiple `github_releases` mounts may share one `path`; their latest release assets are merged into a single flat directory. A separate `name` field is not needed in the first version.
 
 `root_path` is a human-readable string. Normal configs should not need internal IDs such as Quark `fid`. Driver-specific internal IDs should usually be resolved at runtime and cached in SQLite.
 
@@ -306,7 +306,7 @@ Example:
 
 ```json
 {
-  "mount_path": "/quark/restic-repo",
+  "path": "/quark/restic-repo",
   "type": "quark_open",
   "root_path": "/我的备份/restic-repo"
 }
@@ -323,8 +323,8 @@ Example URL tree mount:
 
 ```yaml
 mounts:
-  - mount_path: /github/sing-box
-    type: url_tree
+  - type: url_tree
+    path: /github/sing-box
     root_path: https://github.com/SagerNet/sing-box/releases/download/v1.12.0
     options:
       proxy: http://127.0.0.1:1080
@@ -339,8 +339,8 @@ Example GitHub releases mount:
 
 ```yaml
 mounts:
-  - mount_path: /client
-    type: github_releases
+  - type: github_releases
+    path: /client
     root_path: hiddify/hiddify-app
     options:
       proxy: http://127.0.0.1:1080
@@ -350,8 +350,8 @@ mounts:
         - Hiddify-Android-universal.apk
         - Hiddify-MacOS.dmg
         - Hiddify-Windows-Portable-x64.zip
-  - mount_path: /client
-    type: github_releases
+  - type: github_releases
+    path: /client
     root_path: SagerNet/sing-box
     options:
       proxy: http://127.0.0.1:1080
@@ -367,7 +367,7 @@ auth:
 
 `/github/sing-box/file.tar.gz` maps to `https://github.com/SagerNet/sing-box/releases/download/v1.12.0/file.tar.gz`. The proxy option belongs to this mount only; other mounts can stay direct.
 
-For `github_releases`, sharing `mount_path` creates one flat release asset directory, so `/client/` can contain both Hiddify and sing-box assets. `/client/*` matches descendants at any depth, but not `/client` itself. Listable directories should be granted explicitly.
+For `github_releases`, sharing `path` creates one flat release asset directory, so `/client/` can contain both Hiddify and sing-box assets. `/client/*` matches descendants at any depth, but not `/client` itself. Listable directories should be granted explicitly.
 
 The routing rule should be:
 
@@ -375,7 +375,7 @@ The routing rule should be:
 request path
   -> find mount by scanning mounts from back to front
   -> the first path-segment match wins
-  -> strip mount_path from request path
+  -> strip path from request path
   -> join the remaining path with root_path
   -> call the mount implementation
 ```
@@ -388,17 +388,17 @@ Example:
 {
   "mounts": [
     {
-      "mount_path": "/",
+      "path": "/",
       "type": "quark_open",
       "root_path": "/"
     },
     {
-      "mount_path": "/public",
+      "path": "/public",
       "type": "quark_open",
       "root_path": "/公开"
     },
     {
-      "mount_path": "/public/site",
+      "path": "/public/site",
       "type": "quark_open",
       "root_path": "/网站首页"
     }
@@ -422,7 +422,7 @@ Path matching must be segment-aware:
 / matches everything
 ```
 
-The mounted namespace is independent from S3 bucket naming. The first version can keep one bucket, but the path routing should be based on `mount_path`.
+The mounted namespace is independent from S3 bucket naming. The first version can keep one bucket, but the path routing should be based on `path`.
 
 ## Field Naming
 
@@ -432,7 +432,7 @@ Examples:
 
 ```json
 {
-  "mount_path": "/public",
+  "path": "/public",
   "root_path": "/公开",
   "key_hash": "sha256:...",
 }
@@ -440,7 +440,7 @@ Examples:
 
 Reasons:
 
-- OpenList's JSON fields use names like `mount_path`, `root_path`, and `access_token`.
+- atree config keeps short names like `path`, `root_path`, and `access_token`.
 - Rust `serde` can handle this cleanly with `rename_all = "snake_case"`.
 - Environment variables naturally use upper snake case, such as `ATREE_ROOT_KEY`.
 - Frontend code can still use camelCase internally, but API/config boundaries should stay snake_case.
@@ -500,16 +500,16 @@ The effective config returned by `GET /api/config.yaml` can look like:
 ```yaml
 s3_bucket: atree
 mounts:
-  - mount_path: /quark
-    type: quark_open
+  - type: quark_open
+    path: /quark
     root_path: /
     options:
       refresh_token: '<private refresh token>'
       refresh_url: https://oauth.fnnas.com/api/v1/oauth/refreshToken
-  - mount_path: /api/config.yaml
-    type: system_config
-  - mount_path: /github/sing-box
-    type: url_tree
+  - type: system_config
+    path: /api/config.yaml
+  - type: url_tree
+    path: /github/sing-box
     root_path: https://github.com/SagerNet/sing-box/releases/download/v1.12.0
     options:
       proxy: http://127.0.0.1:1080

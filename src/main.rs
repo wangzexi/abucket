@@ -82,7 +82,7 @@ struct QuarkOpenClient {
     config: Arc<Mutex<QuarkOpenConfig>>,
     db_path: PathBuf,
     service_config: Arc<RwLock<ServiceConfig>>,
-    mount_path: String,
+    path: String,
 }
 
 enum QuarkBackend {
@@ -538,9 +538,9 @@ impl QuarkOpenClient {
         let Some(mount) = service_config
             .mounts
             .iter_mut()
-            .find(|mount| mount.mount_type == "quark_open" && mount.mount_path == self.mount_path)
+            .find(|mount| mount.mount_type == "quark_open" && mount.path == self.path)
         else {
-            bail!("quark_open mount {} no longer exists", self.mount_path);
+            bail!("quark_open mount {} no longer exists", self.path);
         };
         mount.options = serde_json::to_value(snapshot)?;
         save_config_to_db(&self.db_path, &service_config)?;
@@ -927,7 +927,7 @@ async fn state_config_path(state: &AppState) -> String {
         .iter()
         .rev()
         .find(|mount| mount.mount_type == "system_config")
-        .map(|mount| mount.mount_path.clone())
+        .map(|mount| mount.path.clone())
         .unwrap_or_else(|| "/api/config.yaml".to_string())
 }
 
@@ -956,8 +956,8 @@ fn has_virtual_directory(config: &ServiceConfig, virtual_path: &str) -> bool {
     config
         .mounts
         .iter()
-        .map(|mount| normalize_tree_path(&mount.mount_path))
-        .any(|mount_path| mount_path == current || mount_path.starts_with(&prefix))
+        .map(|mount| normalize_tree_path(&mount.path))
+        .any(|path| path == current || path.starts_with(&prefix))
 }
 
 fn is_list_query(params: &HashMap<String, String>) -> bool {
@@ -1242,12 +1242,12 @@ async fn object_handler(
         ResolvedMount::QuarkOpen {
             remote_key,
             config: quark_config,
-            mount_path,
+            path,
         } => {
             drop(config);
             let quark = match quark_open_client(
                 quark_config,
-                &mount_path,
+                &path,
                 state.db_path.clone(),
                 state.config.clone(),
             ) {
@@ -1465,11 +1465,11 @@ async fn list_objects(
         Some(ResolvedMount::QuarkOpen {
             remote_key,
             config: quark_config,
-            mount_path,
+            path,
         }) => {
             let quark = match quark_open_client(
                 quark_config,
-                &mount_path,
+                &path,
                 state.db_path.clone(),
                 state.config.clone(),
             ) {
@@ -1663,10 +1663,10 @@ fn synthetic_mount_listing(
     let mut common_prefixes = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for mount in &config.mounts {
-        if mount.mount_path == "/" {
+        if mount.path == "/" {
             continue;
         }
-        let normalized = normalize_tree_path(&mount.mount_path);
+        let normalized = normalize_tree_path(&mount.path);
         let rest = if current == "/" {
             normalized.trim_start_matches('/')
         } else {
@@ -1725,17 +1725,17 @@ fn hidden_mount_identities(
         .mounts
         .iter()
         .filter(|mount| {
-            if mount.mount_path == "/" {
+            if mount.path == "/" {
                 return false;
             }
             if mount_hidden_from_parent(mount) {
                 return true;
             }
-            let resource = normalize_tree_path(&mount.mount_path);
+            let resource = normalize_tree_path(&mount.path);
             !policy_allows(config, principal, "ListBucket", &resource)
         })
         .filter_map(|mount| {
-            let normalized = normalize_tree_path(&mount.mount_path);
+            let normalized = normalize_tree_path(&mount.path);
             let rest = if current == "/" {
                 normalized.trim_start_matches('/')
             } else {
@@ -3549,12 +3549,12 @@ async fn browser_directory_index(
         ResolvedMount::QuarkOpen {
             remote_key,
             config: quark_config,
-            mount_path,
+            path,
         } => {
             let backend = QuarkBackend::Open(
                 quark_open_client(
                     quark_config,
-                    &mount_path,
+                    &path,
                     state.db_path.clone(),
                     state.config.clone(),
                 )
@@ -4233,9 +4233,9 @@ mod tests {
         }
     }
 
-    fn mount(mount_path: &str, root_path: &str) -> MountConfig {
+    fn mount(path: &str, root_path: &str) -> MountConfig {
         MountConfig {
-            mount_path: mount_path.to_string(),
+            path: path.to_string(),
             mount_type: "quark_open".to_string(),
             root_path: Some(root_path.to_string()),
             options: json!({
@@ -4377,13 +4377,13 @@ mod tests {
         let config = config_with_mounts(vec![
             mount("/", "/root"),
             MountConfig {
-                mount_path: "/github".to_string(),
+                path: "/github".to_string(),
                 mount_type: "url_tree".to_string(),
                 root_path: Some("https://github.com/OpenListTeam/OpenList/releases".to_string()),
                 options: json!({"proxy": "http://127.0.0.1:1080"}),
             },
             MountConfig {
-                mount_path: "/api/config.yaml".to_string(),
+                path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
                 root_path: None,
                 options: Value::Null,
@@ -4454,7 +4454,7 @@ mod tests {
         let config = config_with_mounts(vec![
             mount("/", "/root"),
             MountConfig {
-                mount_path: "/clients/hiddify".to_string(),
+                path: "/clients/hiddify".to_string(),
                 mount_type: "github_releases".to_string(),
                 root_path: Some("hiddify/hiddify-app".to_string()),
                 options: json!({
@@ -4464,7 +4464,7 @@ mod tests {
                 }),
             },
             MountConfig {
-                mount_path: "/api/config.yaml".to_string(),
+                path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
                 root_path: None,
                 options: Value::Null,
@@ -4488,19 +4488,19 @@ mod tests {
     fn duplicate_github_release_mounts_can_form_flat_directory() {
         let config = config_with_mounts(vec![
             MountConfig {
-                mount_path: "/client".to_string(),
+                path: "/client".to_string(),
                 mount_type: "github_releases".to_string(),
                 root_path: Some("hiddify/hiddify-app".to_string()),
                 options: json!({"asset_allow": ["Hiddify-MacOS.dmg"]}),
             },
             MountConfig {
-                mount_path: "/client".to_string(),
+                path: "/client".to_string(),
                 mount_type: "github_releases".to_string(),
                 root_path: Some("SagerNet/sing-box".to_string()),
                 options: json!({"asset_allow": ["sing-box-*-linux-amd64.tar.gz"]}),
             },
             MountConfig {
-                mount_path: "/api/config.yaml".to_string(),
+                path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
                 root_path: None,
                 options: Value::Null,
@@ -4661,7 +4661,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_auth_names_are_normalized() {
+    fn legacy_config_names_are_normalized() {
         let config = parse_config_yaml(
             br#"
 mounts:
@@ -4682,6 +4682,8 @@ auth:
 
         assert_eq!(config.auth.rules[0].principal, "reader");
         let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(yaml.contains("type: system_config\n  path: /api/config.yaml"));
+        assert!(!yaml.contains("mount_path:"));
         assert!(yaml.contains("users:"));
         assert!(yaml.contains("user: reader"));
         assert!(yaml.contains("paths:"));
@@ -4717,7 +4719,7 @@ auth:
         assert!(validate_config(&config).is_err());
 
         let mut config = ServiceConfig::default();
-        config.mounts[0].mount_path = "/".to_string();
+        config.mounts[0].path = "/".to_string();
         assert!(validate_config(&config).is_err());
     }
 
@@ -4913,7 +4915,7 @@ auth:
         *state.config.write().await = config_with_mounts(vec![
             mount("/quark", "/"),
             MountConfig {
-                mount_path: "/api/config.yaml".to_string(),
+                path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
                 root_path: None,
                 options: Value::Null,
@@ -4944,7 +4946,7 @@ auth:
         let mut config = config_with_mounts(vec![
             mount("/public", "/"),
             MountConfig {
-                mount_path: "/api/config.yaml".to_string(),
+                path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
                 root_path: None,
                 options: Value::Null,
@@ -5038,8 +5040,8 @@ auth:
                     .header(header::AUTHORIZATION, "Bearer root-test-key")
                     .body(Body::from(
                         r#"mounts:
-  - mount_path: bad
-    type: quark_open
+  - type: quark_open
+    path: bad
     root_path: /
 "#,
                     ))
@@ -5048,21 +5050,17 @@ auth:
             .await
             .unwrap();
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
-        assert!(
-            response_text(bad)
-                .await
-                .contains("mount_path must start with /")
-        );
+        assert!(response_text(bad).await.contains("path must start with /"));
 
         let good_config = r#"
 mounts:
-  - mount_path: /quark
-    type: quark_open
+  - type: quark_open
+    path: /quark
     root_path: /
     options:
       refresh_token: test-refresh-token
-  - mount_path: /api/config.yaml
-    type: system_config
+  - type: system_config
+    path: /api/config.yaml
 auth:
   users:
     - name: reader
@@ -5088,7 +5086,7 @@ cache:
             .unwrap();
         assert_eq!(put.status(), StatusCode::OK);
         let put_body = response_text(put).await;
-        assert!(put_body.contains("# mounts[].mount_path"));
+        assert!(put_body.contains("# mounts[].path"));
         assert!(put_body.contains("key_hash: sha256:"));
         assert!(!put_body.contains("reader-test-key"));
         assert!(!put_body.contains("\nkey:"));
@@ -5117,13 +5115,13 @@ cache:
         let yaml_config = r#"
 # This comment should be ignored on PUT.
 mounts:
-  - mount_path: /quark
-    type: quark_open
+  - type: quark_open
+    path: /quark
     root_path: /
     options:
       refresh_token: test-refresh-token
-  - mount_path: /api/config.yaml
-    type: system_config
+  - type: system_config
+    path: /api/config.yaml
 auth:
   users:
     # key is accepted only on write and removed on read.
@@ -5171,7 +5169,7 @@ cache:
             Some("application/yaml; charset=utf-8")
         );
         let body = response_text(get).await;
-        assert!(body.contains("# mounts[].mount_path"));
+        assert!(body.contains("# mounts[].path"));
         assert!(body.contains("name: yaml-reader"));
         assert!(body.contains("key_hash: sha256:"));
         assert!(!body.contains("yaml-reader-key"));
@@ -5184,13 +5182,13 @@ cache:
         let app = build_app(state.app_state());
         let delegated_config = r#"
 mounts:
-  - mount_path: /
-    type: quark_open
+  - type: quark_open
+    path: /
     root_path: /
     options:
       refresh_token: test-refresh-token
-  - mount_path: /api/config.yaml
-    type: system_config
+  - type: system_config
+    path: /api/config.yaml
 auth:
   users:
     - name: config-editor
@@ -5249,18 +5247,18 @@ cache:
     }
 
     #[tokio::test]
-    async fn system_config_mount_path_can_be_any_file_path() {
+    async fn system_config_path_can_be_any_file_path() {
         let state = test_state();
         let app = build_app(state.app_state());
         let moved_config = r#"
 mounts:
-  - mount_path: /quark
-    type: quark_open
+  - type: quark_open
+    path: /quark
     root_path: /
     options:
       refresh_token: test-refresh-token
-  - mount_path: /system/live.yaml
-    type: system_config
+  - type: system_config
+    path: /system/live.yaml
 auth:
   users:
     - name: config-reader
@@ -5346,19 +5344,19 @@ cache:
             s3_bucket: "quark".to_string(),
             mounts: vec![
                 MountConfig {
-                    mount_path: "/".to_string(),
+                    path: "/".to_string(),
                     mount_type: "quark_open".to_string(),
                     root_path: Some("/".to_string()),
                     options: Value::Null,
                 },
                 MountConfig {
-                    mount_path: "/api/config.yaml".to_string(),
+                    path: "/api/config.yaml".to_string(),
                     mount_type: "system_config".to_string(),
                     root_path: None,
                     options: Value::Null,
                 },
                 MountConfig {
-                    mount_path: "/github".to_string(),
+                    path: "/github".to_string(),
                     mount_type: "url_tree".to_string(),
                     root_path: Some(format!("http://{addr}/files")),
                     options: json!({"size": 15}),
@@ -5412,7 +5410,7 @@ cache:
         *state.config.write().await = ServiceConfig {
             s3_bucket: "atree".to_string(),
             mounts: vec![MountConfig {
-                mount_path: "/api/config.yaml".to_string(),
+                path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
                 root_path: None,
                 options: Value::Null,
@@ -5440,7 +5438,7 @@ cache:
         *state.config.write().await = ServiceConfig {
             s3_bucket: "atree".to_string(),
             mounts: vec![MountConfig {
-                mount_path: "/api/config.yaml".to_string(),
+                path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
                 root_path: None,
                 options: Value::Null,
@@ -5505,13 +5503,13 @@ cache:
             s3_bucket: "atree".to_string(),
             mounts: vec![
                 MountConfig {
-                    mount_path: "/api/config.yaml".to_string(),
+                    path: "/api/config.yaml".to_string(),
                     mount_type: "system_config".to_string(),
                     root_path: None,
                     options: Value::Null,
                 },
                 MountConfig {
-                    mount_path: "/release/yacd-gh-pages.zip".to_string(),
+                    path: "/release/yacd-gh-pages.zip".to_string(),
                     mount_type: "url_tree".to_string(),
                     root_path: Some(
                         "https://github.com/MetaCubeX/Yacd-meta/archive/gh-pages.zip".to_string(),
@@ -5574,13 +5572,13 @@ cache:
             s3_bucket: "atree".to_string(),
             mounts: vec![
                 MountConfig {
-                    mount_path: "/api/config.yaml".to_string(),
+                    path: "/api/config.yaml".to_string(),
                     mount_type: "system_config".to_string(),
                     root_path: None,
                     options: Value::Null,
                 },
                 MountConfig {
-                    mount_path: "/tmp".to_string(),
+                    path: "/tmp".to_string(),
                     mount_type: "s3".to_string(),
                     root_path: Some("/tmp".to_string()),
                     options: json!({
@@ -5620,7 +5618,7 @@ cache:
             s3_bucket: "atree".to_string(),
             mounts: vec![
                 MountConfig {
-                    mount_path: "/".to_string(),
+                    path: "/".to_string(),
                     mount_type: "s3".to_string(),
                     root_path: Some("/".to_string()),
                     options: json!({
@@ -5631,7 +5629,7 @@ cache:
                     }),
                 },
                 MountConfig {
-                    mount_path: "/quark".to_string(),
+                    path: "/quark".to_string(),
                     mount_type: "quark_open".to_string(),
                     root_path: Some("/".to_string()),
                     options: json!({
@@ -5639,7 +5637,7 @@ cache:
                     }),
                 },
                 MountConfig {
-                    mount_path: "/external".to_string(),
+                    path: "/external".to_string(),
                     mount_type: "github_releases".to_string(),
                     root_path: Some("example/repo".to_string()),
                     options: Value::Null,

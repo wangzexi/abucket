@@ -89,25 +89,23 @@ pub(crate) fn file_browser_html(config_path: &str) -> String {
       .crumbs {{ font-size: 14px; font-weight: 500; }}
       table, thead, tbody, tr, td {{ display: block; }}
       thead {{ display: none; }}
-      tr {{ padding: 12px 14px; border-bottom: 1px solid #e5e7eb; }}
+      tr {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; padding: 12px 14px; border-bottom: 1px solid #e5e7eb; }}
       tbody tr:last-child {{ border-bottom: none; }}
       th, td {{ border-bottom: 0; padding: 0; }}
-      td.name-cell {{ width: 100%; }}
+      td.name-cell {{ grid-column: 1 / -1; width: 100%; }}
       .item-link {{ display: flex; align-items: flex-start; width: 100%; gap: 9px; }}
       .item-name {{ line-height: 1.35; }}
       th.size, td.size, th.time, td.time {{
         width: auto;
-        text-align: left;
         white-space: normal;
       }}
       td.size, td.time {{
-        display: inline-block;
         margin-top: 5px;
-        padding-left: 27px;
         font-size: 12px;
       }}
+      td.size {{ grid-column: 1; padding-left: 27px; text-align: left; }}
+      td.time {{ grid-column: 2; text-align: right; }}
       td.size:empty, td.time:empty {{ display: none; }}
-      td.time {{ margin-left: 8px; }}
     }}
   </style>
 </head>
@@ -203,6 +201,14 @@ pub(crate) fn file_browser_html(config_path: &str) -> String {
         i += 1;
       }}
       return (i ? v.toFixed(1) : v.toFixed(0)) + ' ' + units[i];
+    }}
+    function fmtTime(value) {{
+      if (!value) return '';
+      var date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value).replace(/Z$/, '');
+      function pad(n) {{ return String(n).padStart(2, '0'); }}
+      return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
+        + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
     }}
     function looksInline(contentType) {{
       return /^text\//.test(contentType)
@@ -392,7 +398,7 @@ pub(crate) fn file_browser_html(config_path: &str) -> String {
           + itemIcon(item.type)
           + '<span class="item-name">' + escapeHtml(item.name) + '</span></a></td>'
           + '<td class="size">' + (item.type === 'file' ? fmtBytes(item.size) : '') + '</td>'
-          + '<td class="time muted">' + escapeHtml(item.time || '') + '</td></tr>';
+          + '<td class="time muted">' + escapeHtml(fmtTime(item.time)) + '</td></tr>';
       }}
       rows.innerHTML = html;
     }}

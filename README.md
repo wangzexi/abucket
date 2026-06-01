@@ -78,6 +78,8 @@ cache:
   ttl_seconds: 600
 ```
 
+`rules` 只授权；`/public` 还需要实际可写 mount。
+
 完整配置注释由代码生成：看 `src/config.rs` 的 `config_yaml_comments()` 和 `validate_config()`。Driver 配置看 `src/drivers/*.rs`。
 
 ## 致谢

@@ -215,13 +215,16 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # mounts[].path: service path, must start with /. Example: /quark or /pub
 # mounts[].type: quark_open, system_config, url_tree, github_releases, or s3.
 # mounts[].root_path: only for mounts backed by a remote tree.
-#   quark_open: human-readable Quark path to expose at path.
+#   quark_open: human-readable Quark path, such as / or /backup.
 #   url_tree: upstream http(s) URL prefix. Read-only.
 #   github_releases: GitHub repo in owner/repo form. Read-only.
 #   system_config does not use root_path; path is the config file path.
 # Disable a mount by commenting it out of this YAML.
 # mounts[].options:
-#   quark_open.access_token/refresh_token/app_id/sign_key/refresh_url belong to that mount.
+#   quark_open requires root_path and options.refresh_token.
+#   quark_open optional strings: access_token, app_id, sign_key, refresh_url, root_fid.
+#   default refresh_url: https://api.oplist.org/quarkyun/renewapi.
+#   use https://oauth.fnnas.com/api/v1/oauth/refreshToken when refresh must also learn app_id/sign_key.
 #   url_tree.proxy: optional outbound proxy URL, such as http://127.0.0.1:1080.
 #   url_tree.size: optional file size for file-shaped URL mounts when upstream HEAD is not reliable.
 #   github_releases.repo: owner/repo. If omitted, root_path can be owner/repo.
@@ -250,6 +253,7 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # rules[].paths: service paths such as /public, /public/*, or /*.
 # rules[].actions: ListBucket, HeadObject, GetObject, PutObject, DeleteObject, or *.
 #   /public/* matches descendants at any depth, but not /public itself.
+# rules only grant access; writable paths still need a writable mount.
 # requests that match no rule are denied unless the caller is `root`.
 #
 # cache.enabled: enable local tree cache for ListBucket responses and object GET/HEAD reads.

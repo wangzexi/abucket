@@ -66,11 +66,8 @@ auth:
       actions: [ListBucket]
       resources: [/]
     - principal: key:public
-      actions: [ListBucket]
+      actions: [ListBucket, HeadObject, GetObject, PutObject]
       resources: [/public, /public/*]
-    - principal: key:public
-      actions: [HeadObject, GetObject, PutObject]
-      resources: [/public/*]
 cache:
   enabled: true
   ttl_seconds: 600

@@ -1,8 +1,8 @@
 # atree
 
-AI 友好的文件树网关。
+给个人使用的 AI 友好文件树网关。
 
-atree 把不同后端挂成同一棵树：浏览器访问时是文件树界面，API 访问时是 S3 path-style 协议。配置本身也是树上的一个文件，适合 AI 直接读写 `/api/config.yaml` 来管理 mount、key 和权限。权限模型保持极简：本地 key、allow-list rule、默认拒绝。
+atree 把个人常用后端挂成同一棵树：浏览器访问时是文件树界面，API 访问时是 S3 path-style 协议。配置本身也是树上的一个文件，适合 AI 直接读写 `/api/config.yaml` 来管理 mount 和公开路径。权限模型保持极简：`root` 管理配置，`anonymous` 读取公开路径，默认拒绝。
 
 ```mermaid
 flowchart LR

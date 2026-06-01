@@ -33,10 +33,10 @@ docker run --rm \
   -e ATREE_ROOT_KEY='replace-with-root-key' \
   -e ATREE_DB='/data/atree.sqlite' \
   -v atree-data:/data \
-  ghcr.io/<owner>/atree:latest
+  ghcr.io/wangzexi/atree:latest
 ```
 
-镜像：`ghcr.io/<owner>/atree:latest` 或 `ghcr.io/<owner>/atree:<git-sha>`。
+镜像：`ghcr.io/wangzexi/atree:latest` 或 `ghcr.io/wangzexi/atree:<git-sha>`。
 
 K8s：持久化 `/data`，`ATREE_ROOT_KEY` 用 Secret，`ATREE_DB=/data/atree.sqlite`。
 

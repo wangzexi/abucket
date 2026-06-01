@@ -4631,7 +4631,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_key_is_hashed_and_not_serialized() {
+    fn key_is_hashed_and_not_serialized() {
         let config = ServiceConfig {
             s3_bucket: "atree".to_string(),
             mounts: default_mounts(),
@@ -4657,7 +4657,36 @@ mod tests {
         assert_eq!(key.key_hint, "read...cret");
         let raw = serde_json::to_string(&config).unwrap();
         assert!(!raw.contains("reader-secret"));
-        assert!(!raw.contains("plain_key"));
+        assert!(!raw.contains("\"key\""));
+    }
+
+    #[test]
+    fn legacy_auth_names_are_normalized() {
+        let config = parse_config_yaml(
+            br#"
+mounts:
+  - mount_path: /api/config.yaml
+    type: system_config
+auth:
+  keys:
+    - name: reader
+      plain_key: reader-secret
+  rules:
+    - principal: key:reader
+      actions: [ListBucket]
+      resources: [/*]
+"#,
+        )
+        .and_then(normalize_config)
+        .expect("legacy auth config remains valid");
+
+        assert_eq!(config.auth.rules[0].principal, "reader");
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(yaml.contains("users:"));
+        assert!(yaml.contains("user: reader"));
+        assert!(!yaml.contains("plain_key:"));
+        assert!(!yaml.contains("principal:"));
+        assert!(!yaml.contains("key:reader"));
     }
 
     #[test]
@@ -4982,7 +5011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_api_yaml_requires_root_hashes_plain_key_and_rejects_invalid_config() {
+    async fn config_api_yaml_requires_root_hashes_key_and_rejects_invalid_config() {
         let state = test_state();
         let app = build_app(state.app_state());
 
@@ -5033,9 +5062,9 @@ mounts:
   - mount_path: /api/config.yaml
     type: system_config
 auth:
-  keys:
+  users:
     - name: reader
-      plain_key: reader-test-key
+      key: reader-test-key
   rules:
     - user: reader
       actions: [ListBucket]
@@ -5060,7 +5089,7 @@ cache:
         assert!(put_body.contains("# mounts[].mount_path"));
         assert!(put_body.contains("key_hash: sha256:"));
         assert!(!put_body.contains("reader-test-key"));
-        assert!(!put_body.contains("\nplain_key:"));
+        assert!(!put_body.contains("\nkey:"));
 
         let get = app
             .oneshot(
@@ -5076,7 +5105,7 @@ cache:
         let get_body = response_text(get).await;
         assert!(get_body.contains("name: reader"));
         assert!(!get_body.contains("reader-test-key"));
-        assert!(!get_body.contains("\nplain_key:"));
+        assert!(!get_body.contains("\nkey:"));
     }
 
     #[tokio::test]
@@ -5094,10 +5123,10 @@ mounts:
   - mount_path: /api/config.yaml
     type: system_config
 auth:
-  keys:
-    # plain_key is accepted only on write and removed on read.
+  users:
+    # key is accepted only on write and removed on read.
     - name: yaml-reader
-      plain_key: yaml-reader-key
+      key: yaml-reader-key
   rules:
     - user: yaml-reader
       actions: [ListBucket, GetObject]
@@ -5144,7 +5173,7 @@ cache:
         assert!(body.contains("name: yaml-reader"));
         assert!(body.contains("key_hash: sha256:"));
         assert!(!body.contains("yaml-reader-key"));
-        assert!(!body.contains("\nplain_key:"));
+        assert!(!body.contains("\nkey:"));
     }
 
     #[tokio::test]
@@ -5161,9 +5190,9 @@ mounts:
   - mount_path: /api/config.yaml
     type: system_config
 auth:
-  keys:
+  users:
     - name: config-editor
-      plain_key: config-editor-key
+      key: config-editor-key
   rules:
     - user: config-editor
       actions: [GetObject, PutObject]
@@ -5231,9 +5260,9 @@ mounts:
   - mount_path: /system/live.yaml
     type: system_config
 auth:
-  keys:
+  users:
     - name: config-reader
-      plain_key: config-reader-key
+      key: config-reader-key
   rules:
     - user: config-reader
       actions: [GetObject]

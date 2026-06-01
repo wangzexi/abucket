@@ -55,9 +55,9 @@ mounts:
   - mount_path: /api/config.yaml
     type: system_config
 auth:
-  keys:
+  users:
     - name: public
-      plain_key: f834a310973c0f615cff59f4a692d535e7a0ef7f69059c30
+      key: f834a310973c0f615cff59f4a692d535e7a0ef7f69059c30
   rules:
     - user: root
       actions: [ListBucket, HeadObject, GetObject, PutObject, DeleteObject]

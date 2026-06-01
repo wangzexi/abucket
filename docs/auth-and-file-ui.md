@@ -514,7 +514,7 @@ mounts:
     options:
       proxy: http://127.0.0.1:1080
 auth:
-  keys:
+  users:
     - name: admin
       key_hash: sha256:...
       key_hint: adm_...abcd
@@ -535,9 +535,9 @@ cache:
   max_bytes: 53687091200
 ```
 
-Keys should not be stored in plaintext. Store hashes and hints. If the service later generates a key, show the plaintext key only once.
+User keys should not be stored in plaintext. Store hashes and hints. If the service later generates a key, show the plaintext key only once.
 
-For manual config updates, `PUT /api/config.yaml` can accept a temporary `plain_key` field on a key. The service hashes it, stores only `key_hash` and `key_hint`, and never returns `plain_key`.
+For manual config updates, `PUT /api/config.yaml` can accept a temporary `key` field on a user. The service hashes it, stores only `key_hash` and `key_hint`, and never returns `key`.
 
 ## Policy Model
 

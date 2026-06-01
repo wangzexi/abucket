@@ -38,6 +38,7 @@ pub(crate) struct MountConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AuthConfig {
+    #[serde(rename = "users", alias = "keys")]
     #[serde(default)]
     pub(crate) keys: Vec<KeyConfig>,
     #[serde(default)]
@@ -53,6 +54,7 @@ pub(crate) struct KeyConfig {
     pub(crate) key_hint: String,
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
+    #[serde(rename = "key", alias = "plain_key")]
     #[serde(default, skip_serializing)]
     pub(crate) plain_key: Option<String>,
 }
@@ -192,7 +194,7 @@ pub(crate) fn normalize_config(mut config: ServiceConfig) -> Result<ServiceConfi
     for key in &mut config.auth.keys {
         if let Some(plain) = key.plain_key.take() {
             if plain.len() < 8 {
-                bail!("plain_key for '{}' must be at least 8 characters", key.name);
+                bail!("key for user '{}' must be at least 8 characters", key.name);
             }
             key.key_hash = hash_key(&plain);
             key.key_hint = key_hint(&plain);
@@ -261,12 +263,12 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 #   mount_path is one mounted file path, not a directory. Example: {config_path}
 #   if you move this path, auth.rules must target the new path; the old path will 404.
 #
-# auth.keys: named service keys. Do not store plaintext keys here.
-# auth.keys[].plain_key: allowed only in PUT; the service stores key_hash/key_hint and never returns plain_key.
-# auth.keys[].key_hash: sha256:<hex> hash generated from plain_key.
-# auth.keys[].key_hint: short non-secret hint for humans.
+# auth.users: named users. Do not store plaintext keys here.
+# auth.users[].key: allowed only in PUT; the service stores key_hash/key_hint and never returns key.
+# auth.users[].key_hash: sha256:<hex> hash generated from key.
+# auth.users[].key_hint: short non-secret hint for humans.
 # auth.rules: default-deny allow-list.
-# auth.rules[].user: anonymous, root, or a name from auth.keys.
+# auth.rules[].user: anonymous, root, or a name from auth.users.
 # auth.rules[].actions: ListBucket, HeadObject, GetObject, PutObject, DeleteObject, or *.
 # auth.rules[].resources: service paths such as /public, /public/*, or /*.
 #   /public/* matches descendants at any depth, but not /public itself.
@@ -496,16 +498,16 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
     let mut names = HashSet::new();
     for key in &config.auth.keys {
         if key.name.trim().is_empty() {
-            bail!("auth key name cannot be empty");
+            bail!("auth user name cannot be empty");
         }
         if !names.insert(key.name.clone()) {
-            bail!("duplicate auth key '{}'", key.name);
+            bail!("duplicate auth user '{}'", key.name);
         }
         if matches!(key.name.as_str(), "anonymous" | "root") {
-            bail!("auth key '{}' uses a reserved name", key.name);
+            bail!("auth user '{}' uses a reserved name", key.name);
         }
         if key.enabled && !key.key_hash.starts_with("sha256:") {
-            bail!("auth key '{}' needs key_hash or plain_key", key.name);
+            bail!("auth user '{}' needs key_hash or key", key.name);
         }
     }
 

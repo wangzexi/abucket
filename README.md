@@ -55,6 +55,9 @@ mounts:
   - mount_path: /api/config.yaml
     type: system_config
 auth:
+  keys:
+    - name: public
+      plain_key: f834a310973c0f615cff59f4a692d535e7a0ef7f69059c30
   rules:
     - principal: root
       actions: [ListBucket, HeadObject, GetObject, PutObject, DeleteObject]
@@ -62,6 +65,12 @@ auth:
     - principal: anonymous
       actions: [ListBucket]
       resources: [/]
+    - principal: key:public
+      actions: [ListBucket]
+      resources: [/public, /public/*]
+    - principal: key:public
+      actions: [HeadObject, GetObject, PutObject]
+      resources: [/public/*]
 cache:
   enabled: true
   ttl_seconds: 600

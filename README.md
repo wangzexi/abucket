@@ -60,6 +60,14 @@ bucket: atree
 mounts:
   - type: system_config
     path: /api/config.yaml
+  - type: s3
+    path: /public
+    root_path: /
+    options:
+      endpoint: https://s3.example.com
+      bucket: public
+      access_key: key12345
+      secret_key: sec12345
 users:
   - name: public
     key: public01
@@ -78,7 +86,7 @@ cache:
   ttl_seconds: 600
 ```
 
-`rules` 只授权；`/public` 还需要实际可写 mount。
+`root` 来自 `ATREE_ROOT_KEY`，不用写进 `users`。`rules` 只授权；可写路径还需要实际可写 mount。
 
 完整配置注释由代码生成：看 `src/config.rs` 的 `config_yaml_comments()` 和 `validate_config()`。Driver 配置看 `src/drivers/*.rs`。
 

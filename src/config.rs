@@ -234,7 +234,7 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 #   github_releases.show_source_code: optional boolean. Exposes GitHub's source zip/tarball links.
 #   Multiple github_releases mounts can share one path to create a flat merged directory.
 #   s3.endpoint/bucket/access_key/secret_key: required for S3-compatible mounts.
-#   s3.region: optional, default us-east-1. s3.path_style: optional, default true.
+#   s3.region: optional, default us-east-1. atree uses path-style S3 requests.
 #   s3.proxy: optional outbound proxy URL.
 #   hide_from_parent: optional boolean. Hides this mount only from its parent directory listing.
 #     Direct requests to path still resolve normally and still use rules.
@@ -403,9 +403,7 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                     "bucket",
                     "region",
                     "access_key",
-                    "access_key_id",
                     "secret_key",
-                    "secret_access_key",
                     "session_token",
                     "proxy",
                 ] {
@@ -429,7 +427,6 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                 if mount
                     .options
                     .get("access_key")
-                    .or_else(|| mount.options.get("access_key_id"))
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
                     .is_none()
@@ -439,7 +436,6 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                 if mount
                     .options
                     .get("secret_key")
-                    .or_else(|| mount.options.get("secret_access_key"))
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
                     .is_none()
@@ -452,7 +448,7 @@ pub(crate) fn validate_config(config: &ServiceConfig) -> Result<()> {
                 if let Some(proxy) = mount.options.get("proxy").and_then(Value::as_str) {
                     validate_http_url(proxy, "options.proxy")?;
                 }
-                for key in ["path_style", "force_path_style", "hide_from_parent"] {
+                for key in ["hide_from_parent"] {
                     if let Some(value) = mount.options.get(key)
                         && !value.is_boolean()
                         && !value.is_string()

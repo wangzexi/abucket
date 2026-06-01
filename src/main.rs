@@ -2065,9 +2065,6 @@ async fn s3_send(
     body: Bytes,
     query: Option<Vec<(String, String)>>,
 ) -> Result<reqwest::Response> {
-    if !config.path_style {
-        bail!("s3 backend currently supports path_style endpoints only");
-    }
     let client = http_client_with_proxy(config.proxy.as_deref())?;
     let mut url = Url::parse(config.endpoint.trim_end_matches('/'))?;
     url.set_path(&s3_path_style_path(&config.bucket, key));

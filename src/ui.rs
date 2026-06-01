@@ -70,7 +70,7 @@ pub(crate) fn file_browser_html(config_path: &str) -> String {
     .item-link {{ display: inline-flex; align-items: center; gap: 9px; min-width: 0; max-width: 100%; vertical-align: middle; }}
     .item-icon {{ width: 18px; height: 18px; flex: 0 0 18px; color: #9ca3af; }}
     .item-icon.dir {{ color: #2563eb; }}
-    .item-name {{ overflow-wrap: anywhere; }}
+    .item-name {{ min-width: 0; overflow-wrap: break-word; word-break: normal; }}
     .muted {{ color: #6b7280; }}
     .error {{ color: #b42318; }}
     .help {{ margin-top: 14px; font-size: 12px; color: #6b7280; }}
@@ -80,6 +80,35 @@ pub(crate) fn file_browser_html(config_path: &str) -> String {
     .brand {{ font-size: 20px; font-weight: 700; color: #2563eb; text-decoration: none; }}
     .brand:hover {{ color: #1d4ed8; }}
     .tagline {{ font-size: 13px; color: #6b7280; white-space: nowrap; }}
+    @media (max-width: 640px) {{
+      header {{ flex-wrap: wrap; align-items: flex-start; padding: 14px 16px; }}
+      main {{ padding: 18px 14px 36px; }}
+      .brand-wrap {{ width: 100%; }}
+      .auth {{ width: 100%; }}
+      input {{ width: 100%; min-width: 0; box-sizing: border-box; }}
+      .crumbs {{ font-size: 14px; font-weight: 500; }}
+      table, thead, tbody, tr, td {{ display: block; }}
+      thead {{ display: none; }}
+      tr {{ padding: 12px 14px; border-bottom: 1px solid #e5e7eb; }}
+      tbody tr:last-child {{ border-bottom: none; }}
+      th, td {{ border-bottom: 0; padding: 0; }}
+      td.name-cell {{ width: 100%; }}
+      .item-link {{ display: flex; align-items: flex-start; width: 100%; gap: 9px; }}
+      .item-name {{ line-height: 1.35; }}
+      th.size, td.size, th.time, td.time {{
+        width: auto;
+        text-align: left;
+        white-space: normal;
+      }}
+      td.size, td.time {{
+        display: inline-block;
+        margin-top: 5px;
+        padding-left: 27px;
+        font-size: 12px;
+      }}
+      td.size:empty, td.time:empty {{ display: none; }}
+      td.time {{ margin-left: 8px; }}
+    }}
   </style>
 </head>
 <body>

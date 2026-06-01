@@ -68,7 +68,7 @@ mounts:
       sign_key: '<private sign key>'
 ```
 
-OpenList APIPages 风格的刷新接口通常只返回 access/refresh token，不返回 Quark Open 请求签名所需的 `sign_key`。atree 的 `refresh_url` 应该设为能返回完整 token 信息的刷新接口，例如 `https://oauth.fnnas.com/api/v1/oauth/refreshToken`，这样能同时刷新 token 并保存 `app_id/sign_key`。
+OpenList 上游 `quark_open` driver 的默认在线刷新接口是 `https://api.oplist.org/quarkyun/renewapi`，请求参数是 `refresh_ui`、`server_use=true` 和 `driver_txt=quarkyun_oa`。这个接口兼容 OpenList 的 access/refresh token 刷新流程；atree 还需要 Quark Open 请求签名用的 `app_id/sign_key`，所以如果配置里没有这两个字段，应把 `refresh_url` 指向能返回完整 token 信息的刷新接口，例如 `https://oauth.fnnas.com/api/v1/oauth/refreshToken`。
 
 配置文件本身也是挂载树的一部分。`system_config` 直接挂到某个单文件路径上，默认是 `/api/config.yaml`，也可以改到其它路径。例如：
 

@@ -4373,7 +4373,7 @@ mod tests {
             MountConfig {
                 mount_path: "/github".to_string(),
                 mount_type: "url_tree".to_string(),
-                root_path: Some("https://github.com/example-org/releases".to_string()),
+                root_path: Some("https://github.com/OpenListTeam/OpenList/releases".to_string()),
                 options: json!({"proxy": "http://127.0.0.1:1080"}),
             },
             MountConfig {
@@ -4391,7 +4391,7 @@ mod tests {
         assert!(matches!(
             resolve_mount(&config, "/github/client.tar.gz"),
             Some(ResolvedMount::UrlTree { url, proxy, size: _ })
-                if url == "https://github.com/example-org/releases/client.tar.gz"
+                if url == "https://github.com/OpenListTeam/OpenList/releases/client.tar.gz"
                     && proxy.as_deref() == Some("http://127.0.0.1:1080")
         ));
         assert!(!matches!(

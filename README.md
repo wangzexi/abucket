@@ -35,7 +35,7 @@ flowchart LR
 ```bash
 docker run --rm \
   -p 9000:9000 \
-  -e ATREE_ROOT_KEY='11525b32eccbdb118df09f60cfe28061b2665fe7a6635ecf' \
+  -e ATREE_ROOT_KEY='root1234' \
   -e ATREE_DB='/data/atree.sqlite' \
   -v atree-data:/data \
   ghcr.io/wangzexi/atree:latest
@@ -62,7 +62,7 @@ mounts:
     path: /api/config.yaml
 users:
   - name: public
-    key: f834a310973c0f615cff59f4a692d535e7a0ef7f69059c30
+    key: public01
 rules:
   - user: root
     paths: [/, /*]

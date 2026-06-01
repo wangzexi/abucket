@@ -13,8 +13,6 @@ docker run --rm \
   ghcr.io/wangzexi/atree:latest
 ```
 
-镜像：`ghcr.io/wangzexi/atree:latest` 或 `ghcr.io/wangzexi/atree:<git-sha>`。
-
 ## 配置入口
 
 ```bash

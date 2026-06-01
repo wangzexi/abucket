@@ -27,9 +27,27 @@ curl -X PUT \
   'http://127.0.0.1:9000/api/config.yaml'
 ```
 
-配置注释由代码生成：看 `src/config.rs` 的 `config_yaml_comments()` 和 `validate_config()`。mount 支持类型在 `src/mounts.rs`。
+最小 `config.yaml` 骨架：
 
-OpenList QuarkOpen 默认刷新接口是 `https://api.oplist.org/quarkyun/renewapi`。如果需要让 atree 获取 `app_id/sign_key`，看 `docs/oauth-notes.md`。
+```yaml
+s3_bucket: atree
+mounts:
+  - mount_path: /api/config.yaml
+    type: system_config
+auth:
+  keys:
+    - name: admin
+      plain_key: replace-with-admin-key
+  rules:
+    - principal: key:admin
+      actions: [ListBucket, HeadObject, GetObject, PutObject, DeleteObject]
+      resources: [/*]
+cache:
+  enabled: true
+  ttl_seconds: 600
+```
+
+完整配置注释由代码生成：看 `src/config.rs` 的 `config_yaml_comments()` 和 `validate_config()`。mount 支持类型在 `src/mounts.rs`。QuarkOpen 细节看 `docs/oauth-notes.md`。
 
 ## 致谢
 

@@ -61,7 +61,7 @@ auth:
       resources: [/*]
     - principal: anonymous
       actions: [ListBucket, HeadObject, GetObject]
-      resources: [/public, /public/*]
+      resources: [/, /*]
 cache:
   enabled: true
   ttl_seconds: 600

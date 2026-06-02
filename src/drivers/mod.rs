@@ -2,6 +2,7 @@ pub(crate) mod github_releases;
 pub(crate) mod options;
 pub(crate) mod quark_open;
 pub(crate) mod s3;
+pub(crate) mod system_config;
 pub(crate) mod url_tree;
 
 pub(crate) use github_releases::{GithubReleasesConfig, client as github_client};

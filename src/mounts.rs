@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 
 use crate::drivers::{GithubReleasesConfig, QuarkOpenConfig, S3Config};
-use crate::drivers::{github_releases, quark_open, s3, url_tree};
+use crate::drivers::{github_releases, quark_open, s3, system_config, url_tree};
 use crate::{QuarkBackend, config};
 
 #[derive(Debug, Clone)]
@@ -61,9 +61,12 @@ pub(crate) fn resolve_mount(
                 path: mount.path.clone(),
             })
         }
-        "system_config" => Some(ResolvedMount::SystemConfig {
-            virtual_path: path.to_string(),
-        }),
+        "system_config" => {
+            let target = system_config::target_from_mount(mount, &path);
+            Some(ResolvedMount::SystemConfig {
+                virtual_path: target.virtual_path,
+            })
+        }
         "url_tree" => {
             let rest = strip_base_path(&mount.path, &path);
             let target = url_tree::target_from_mount(mount, rest)?;

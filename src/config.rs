@@ -218,6 +218,7 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 #   quark_open: human-readable Quark path, such as / or /backup.
 #   url_tree: upstream http(s) URL prefix. Read-only.
 #   github_releases: GitHub repo in owner/repo form. Read-only.
+#   s3: optional object key prefix. Omit it to use the bucket root.
 #   system_config does not use root_path; path is the config file path.
 # Disable a mount by commenting it out of this YAML.
 # mounts[].options:

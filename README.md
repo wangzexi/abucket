@@ -58,7 +58,6 @@ mounts:
     path: /api/config.yaml
   - type: s3
     path: /public
-    root_path: /
     options:
       endpoint: https://s3.example.com
       bucket: public

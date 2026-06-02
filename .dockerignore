@@ -3,4 +3,4 @@ target
 .github
 tmp
 *.sqlite
-quark-open-oauth.yaml
+.DS_Store

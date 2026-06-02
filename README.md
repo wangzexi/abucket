@@ -39,7 +39,7 @@ docker run --rm \
   ghcr.io/wangzexi/atree:latest
 ```
 
-## 配置入口
+## 配置
 
 ```bash
 curl -H 'Authorization: Bearer <root-key>' \
@@ -50,8 +50,6 @@ curl -X PUT \
   --data-binary @config.yaml \
   'http://127.0.0.1:9000/api/config.yaml'
 ```
-
-最小 `config.yaml` 骨架：
 
 ```yaml
 bucket: atree

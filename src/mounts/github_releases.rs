@@ -1,4 +1,4 @@
-//! GitHub Releases mount driver.
+//! GitHub Releases mount.
 //!
 //! The mounted tree is generated from one repository's release metadata. It can
 //! expose only assets, or include GitHub-generated source archives when
@@ -21,7 +21,7 @@ use reqwest::{Client, Proxy};
 use serde::Deserialize;
 
 use crate::config;
-use crate::drivers::options;
+use crate::mounts::options;
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct GithubReleasesConfig {

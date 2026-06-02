@@ -83,7 +83,7 @@ cache:
 
 内置用户有两个：`root` 来自 `ATREE_ROOT_KEY`，拥有管理入口；`anonymous` 是未带 key 的访问。它们都不用写进 `users`。`rules` 只授权；可写路径还需要实际可写 mount。
 
-完整配置注释由代码生成：看 `src/config.rs` 的 `config_yaml_comments()` 和 `validate_config()`。Driver 配置看 `src/drivers/*.rs`。
+完整配置注释由代码生成：看 `src/config.rs` 的 `config_yaml_comments()` 和 `validate_config()`。Mount 配置看 `src/mounts/*.rs`。
 
 ## 致谢
 

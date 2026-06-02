@@ -1,4 +1,4 @@
-//! S3 mount driver.
+//! S3 mount.
 //!
 //! This is the generic object-storage backend. It expects explicit credentials
 //! in config and uses path-style addressing for self-hosted or S3-like endpoints.
@@ -18,7 +18,7 @@
 use serde::Deserialize;
 
 use crate::config;
-use crate::drivers::options;
+use crate::mounts::options;
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]

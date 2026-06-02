@@ -1,6 +1,6 @@
-//! QuarkOpen mount driver.
+//! QuarkOpen mount.
 //!
-//! This driver mounts Quark Drive through its open-api shape. The default
+//! This mount uses Quark Drive through its open-api shape. The default
 //! refresh endpoint follows OpenList's `drivers/quark_open` behavior:
 //! `https://api.oplist.org/quarkyun/renewapi`.
 //!
@@ -25,7 +25,7 @@
 //! - `options.root_fid`: optional Quark folder id cache; defaults to `0`.
 //!
 //! OpenList reference:
-//! - driver path: `drivers/quark_open`
+//! - OpenList driver path: `drivers/quark_open`
 //! - API base: `https://open-api-drive.quark.cn`
 //! - signing shape: `sha256(method + "&" + pathname + "&" + timestamp_ms + "&" + sign_key)`
 
@@ -36,7 +36,7 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::drivers::options;
+use crate::mounts::options;
 use crate::{QuarkOpenClient, config};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -215,11 +215,11 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # mounts[].path: service path, must start with /. Example: /quark or /pub
 # mounts[].type: quark_open, system_config, url_tree, github_releases, or s3.
 # mounts[].root_path: only for mounts backed by a remote tree.
-#   Driver field details are documented where they are parsed: src/drivers/*.rs.
+#   Mount field details are documented where they are parsed: src/mounts/*.rs.
 #   system_config does not use root_path; path is the config file path.
 # Disable a mount by commenting it out of this YAML.
 # mounts[].options:
-#   Driver-specific fields live here. Read src/drivers/*.rs for exact meaning.
+#   Mount-specific fields live here. Read src/mounts/*.rs for exact meaning.
 #   hide_from_parent: optional boolean. Hides this mount only from its parent directory listing.
 #     Direct requests to path still resolve normally and still use rules.
 #     This is discoverability control, not a security boundary.
@@ -241,7 +241,7 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # requests that match no rule are denied unless the caller is `root`.
 #
 # cache.enabled: enable local tree cache for ListBucket responses and object GET/HEAD reads.
-#   GitHub release mounts also cache driver metadata behind the same TTL.
+#   GitHub release mounts also cache mount metadata behind the same TTL.
 # cache.ttl_seconds: cached freshness window. Default: 600.
 # cache.max_bytes: max local cache size in bytes; it is not backend capacity.
 #

@@ -1,6 +1,6 @@
-//! URL Tree mount driver.
+//! URL Tree mount.
 //!
-//! This driver maps atree paths onto a remote URL prefix. It is intentionally
+//! This mount maps atree paths onto a remote URL prefix. It is intentionally
 //! thin: atree only joins paths, optionally applies a proxy, and streams the
 //! target response back through the S3-compatible surface.
 //!
@@ -14,7 +14,7 @@
 use reqwest::Url;
 
 use crate::config;
-use crate::drivers::options;
+use crate::mounts::options;
 
 #[derive(Debug, Clone)]
 pub(crate) struct UrlTreeTarget {

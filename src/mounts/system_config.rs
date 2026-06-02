@@ -1,6 +1,6 @@
-//! System config mount driver.
+//! System config mount.
 //!
-//! This driver exposes the live atree config as one file in the same tree used
+//! This mount exposes the live atree config as one file in the same tree used
 //! by every other mount. The default path is `/api/config.yaml`.
 //!
 //! Mount config:

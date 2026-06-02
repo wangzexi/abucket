@@ -8,6 +8,16 @@
 //! is enough to refresh tokens. When atree must learn `app_id`/`sign_key` from a
 //! refresh response, point `refresh_url` at the FnOS OAuth endpoint:
 //! `https://oauth.fnnas.com/api/v1/oauth/refreshToken`.
+//!
+//! Config lives in mount `options`: `refresh_token` is required; `access_token`,
+//! `app_id`, `sign_key`, `refresh_url`, and `root_fid` are optional strings.
+//! atree writes refreshed OAuth state back into the same mount options in
+//! `/api/config.yaml`.
+//!
+//! OpenList reference:
+//! - driver path: `drivers/quark_open`
+//! - API base: `https://open-api-drive.quark.cn`
+//! - signing shape: `sha256(method + "&" + pathname + "&" + timestamp_ms + "&" + sign_key)`
 
 use std::{path::PathBuf, sync::Arc};
 

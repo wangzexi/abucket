@@ -6,7 +6,7 @@
 //!
 //! Mount config:
 //! - `path`: atree directory exposed to users.
-//! - `root_path`: required upstream HTTP(S) URL prefix. Read-only.
+//! - `root_path`: required upstream HTTP(S) URL prefix.
 //! - `options.proxy`: optional outbound proxy.
 //! - `options.size`: optional fixed file size for file-shaped URL mounts when
 //!   upstream `HEAD` is unreliable.

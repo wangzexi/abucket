@@ -2720,7 +2720,7 @@ async fn url_object(
         return s3_error(
             StatusCode::METHOD_NOT_ALLOWED,
             "MethodNotAllowed",
-            "url_tree mounts are read-only",
+            "method not supported for this mount",
         );
     }
     let client = match http_client_with_proxy(proxy.as_deref()) {
@@ -2798,7 +2798,7 @@ async fn github_releases_object(
         return s3_error(
             StatusCode::METHOD_NOT_ALLOWED,
             "MethodNotAllowed",
-            "github_releases mounts are read-only",
+            "method not supported for this mount",
         );
     }
     let rest = rest.trim_matches('/');
@@ -2889,7 +2889,7 @@ async fn github_releases_object_any(
         return s3_error(
             StatusCode::METHOD_NOT_ALLOWED,
             "MethodNotAllowed",
-            "github_releases mounts are read-only",
+            "method not supported for this mount",
         );
     }
     let Some((rest, _)) = mounts.first() else {

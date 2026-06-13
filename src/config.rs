@@ -112,19 +112,19 @@ fn default_cache_ttl_seconds() -> u64 {
 }
 
 fn default_bucket() -> String {
-    "atree".to_string()
+    "abucket".to_string()
 }
 
 pub(crate) fn config_db_path() -> Result<PathBuf> {
-    if let Ok(path) = env::var("ATREE_DB") {
+    if let Ok(path) = env::var("ABUCKET_DB").or_else(|_| env::var("ATREE_DB")) {
         return Ok(PathBuf::from(path));
     }
-    let home = env::var("HOME").context("HOME is required when ATREE_DB is not set")?;
+    let home = env::var("HOME").context("HOME is required when neither ABUCKET_DB nor ATREE_DB is set")?;
     Ok(PathBuf::from(home)
         .join(".local")
         .join("share")
-        .join("atree")
-        .join("atree.sqlite"))
+        .join("abucket")
+        .join("abucket.sqlite"))
 }
 
 pub(crate) fn mount_root_path(mount: &MountConfig) -> &str {
@@ -206,11 +206,11 @@ pub(crate) fn commented_yaml(
 
 fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
     format!(
-        r#"# atree config
+        r#"# abucket config
 # This is the live service config. Comments are ignored on PUT.
-# If ATREE_ROOT_KEY is set, that key is treated as user `root`.
+# If ABUCKET_ROOT_KEY is set, that key is treated as user `root`.
 #
-# bucket: path-style S3 bucket name used by clients. Default: atree.
+# bucket: path-style S3 bucket name used by clients. Default: abucket.
 # mounts: ordered mount table. Later mounts have higher priority.
 # mounts[].path: service path, must start with /. Example: /quark or /pub
 # mounts[].type: quark_open, system_config, url_tree, github_releases, or s3.
@@ -245,7 +245,7 @@ fn config_yaml_comments(public_base_url: &str, config_path: &str) -> String {
 # cache.ttl_seconds: cached freshness window. Default: 600.
 # cache.max_bytes: max local cache size in bytes; it is not backend capacity.
 #
-# `atree` is an S3-style file API with one mounted system config file.
+# `abucket` is an S3-style file API with one mounted system config file.
 #
 # Examples:
 #   curl -H 'Authorization: Bearer <root-key>' '{public_base_url}{config_path}'

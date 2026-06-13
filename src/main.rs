@@ -877,9 +877,11 @@ async fn main() -> Result<()> {
     let cache_dir = cache_dir_path();
     std::fs::create_dir_all(&cache_dir)?;
     let config = load_or_init_config(&db_path)?;
-    let root_key = env::var("ATREE_ROOT_KEY").ok();
+    let root_key = env::var("ABUCKET_ROOT_KEY")
+        .ok()
+        .or_else(|| env::var("ATREE_ROOT_KEY").ok());
     if root_key.is_none() {
-        warn!("ATREE_ROOT_KEY is not set; only explicit auth rules will grant access");
+        warn!("ABUCKET_ROOT_KEY is not set; only explicit auth rules will grant access");
     }
     let bind: SocketAddr = env::var("BIND")
         .unwrap_or_else(|_| "127.0.0.1:9000".into())
@@ -894,21 +896,23 @@ async fn main() -> Result<()> {
     };
     let app = build_app(state);
     let listener = TcpListener::bind(bind).await?;
-    info!("serving atree at http://{bind}");
+    info!("serving abucket at http://{bind}");
     axum::serve(listener, app).await?;
     Ok(())
 }
 
 fn multipart_dir_path() -> PathBuf {
-    env::var("ATREE_MULTIPART_DIR")
+    env::var("ABUCKET_MULTIPART_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| env::temp_dir().join("atree").join("multipart"))
+        .or_else(|_| env::var("ATREE_MULTIPART_DIR").map(PathBuf::from))
+        .unwrap_or_else(|_| env::temp_dir().join("abucket").join("multipart"))
 }
 
 fn cache_dir_path() -> PathBuf {
-    env::var("ATREE_CACHE_DIR")
+    env::var("ABUCKET_CACHE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| env::temp_dir().join("atree").join("cache"))
+        .or_else(|_| env::var("ATREE_CACHE_DIR").map(PathBuf::from))
+        .unwrap_or_else(|_| env::temp_dir().join("abucket").join("cache"))
 }
 
 async fn state_bucket(state: &AppState) -> String {
@@ -2598,7 +2602,7 @@ fn tree_list_cache_key(
     offset: usize,
 ) -> String {
     format!(
-        "/.atree/cache/tree/ListBucket/bucket={bucket}/user={user}/resource={resource}/prefix={prefix}/delimiter={}/max={max_keys}/offset={offset}",
+        "/.abucket/cache/tree/ListBucket/bucket={bucket}/user={user}/resource={resource}/prefix={prefix}/delimiter={}/max={max_keys}/offset={offset}",
         delimiter.unwrap_or("")
     )
 }
@@ -2732,7 +2736,7 @@ async fn url_object(
         Method::HEAD => client.head(&url),
         _ => unreachable!(),
     }
-    .header(header::USER_AGENT, "atree/url-tree");
+    .header(header::USER_AGENT, "abucket/url-tree");
     if let Some(range) = headers.get(header::RANGE) {
         req = req.header(header::RANGE, range);
     }
@@ -3133,7 +3137,7 @@ fn github_release_cache_key(config: &GithubReleasesConfig) -> String {
         .map(|token| hex::encode(Sha256::digest(token.as_bytes())))
         .unwrap_or_else(|| "anonymous".to_string());
     format!(
-        "/.atree/cache/github_releases/{}/{}",
+        "/.abucket/cache/github_releases/{}/{}",
         config.repo, token_hash
     )
 }
@@ -4216,7 +4220,7 @@ mod tests {
 
     fn config_with_mounts(mounts: Vec<MountConfig>) -> ServiceConfig {
         ServiceConfig {
-            bucket: "atree".to_string(),
+            bucket: "abucket".to_string(),
             mounts,
             users: Vec::new(),
             rules: Vec::new(),
@@ -4243,20 +4247,20 @@ mod tests {
     fn test_state() -> TestState {
         let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
         let db_path = std::env::temp_dir().join(format!(
-            "atree-test-{}-{}-{}.sqlite",
+            "abucket-test-{}-{}-{}.sqlite",
             std::process::id(),
             chrono_millis(),
             id
         ));
         let config = load_or_init_config(&db_path).unwrap();
         let multipart_dir = std::env::temp_dir().join(format!(
-            "atree-test-multipart-{}-{}-{}",
+            "abucket-test-multipart-{}-{}-{}",
             std::process::id(),
             chrono_millis(),
             id
         ));
         let cache_dir = std::env::temp_dir().join(format!(
-            "atree-test-cache-{}-{}-{}",
+            "abucket-test-cache-{}-{}-{}",
             std::process::id(),
             chrono_millis(),
             id
@@ -4296,14 +4300,14 @@ mod tests {
                 content_type: Some("text/plain".to_string()),
             },
         };
-        write_cached_object(&state, "/atree/demo.txt", &cached).await;
-        let loaded = read_cached_object(&state, "/atree/demo.txt").await;
+        write_cached_object(&state, "/abucket/demo.txt", &cached).await;
+        let loaded = read_cached_object(&state, "/abucket/demo.txt").await;
         assert!(loaded.is_some());
         assert_eq!(loaded.unwrap().bytes, Bytes::from_static(b"hello cache"));
 
-        invalidate_cached_object(&state, "/atree/demo.txt").await;
+        invalidate_cached_object(&state, "/abucket/demo.txt").await;
         assert!(
-            read_cached_object(&state, "/atree/demo.txt")
+            read_cached_object(&state, "/abucket/demo.txt")
                 .await
                 .is_none()
         );
@@ -4331,8 +4335,8 @@ mod tests {
 
     #[test]
     fn empty_db_is_initialized_with_default_config() {
-        let root = TestDir::new("atree-default-config");
-        let db_path = root.join("atree.sqlite");
+        let root = TestDir::new("abucket-default-config");
+        let db_path = root.join("abucket.sqlite");
 
         let config = load_or_init_config(&db_path).unwrap();
 
@@ -4557,7 +4561,7 @@ mod tests {
     #[tokio::test]
     async fn github_release_list_preserves_directory_prefix_slash() {
         let response = list_xml_entries(
-            "atree",
+            "abucket",
             "hiddify/",
             Some("/"),
             vec![S3Entry {
@@ -4624,7 +4628,7 @@ mod tests {
     #[test]
     fn key_is_hashed_and_not_serialized() {
         let config = ServiceConfig {
-            bucket: "atree".to_string(),
+            bucket: "abucket".to_string(),
             mounts: default_mounts(),
             users: vec![KeyConfig {
                 name: "reader".to_string(),
@@ -4698,8 +4702,8 @@ mod tests {
             .unwrap();
         assert_eq!(html_resp.status(), StatusCode::OK);
         let html = response_text(html_resp).await;
-        assert!(html.contains("atree"));
-        assert!(html.contains("atree_key"));
+        assert!(html.contains("abucket"));
+        assert!(html.contains("abucket_key"));
 
         let xml_resp = app
             .oneshot(
@@ -4721,14 +4725,14 @@ mod tests {
         let headers = HeaderMap::new();
         let params = parse_query("list-type=2&delimiter=/");
         assert_eq!(
-            request_virtual_path("atree", false, "atree", &Method::GET, &headers, &params),
+            request_virtual_path("abucket", false, "abucket", &Method::GET, &headers, &params),
             "/"
         );
         assert_eq!(
             request_virtual_path(
-                "atree/quark/restic-repo",
+                "abucket/quark/restic-repo",
                 false,
-                "atree",
+                "abucket",
                 &Method::GET,
                 &headers,
                 &params
@@ -4739,14 +4743,14 @@ mod tests {
         let direct_params = HashMap::new();
         assert_eq!(
             request_virtual_path(
-                "atree/quark/restic-repo",
+                "abucket/quark/restic-repo",
                 false,
-                "atree",
+                "abucket",
                 &Method::GET,
                 &headers,
                 &direct_params
             ),
-            "/atree/quark/restic-repo"
+            "/abucket/quark/restic-repo"
         );
     }
 
@@ -4760,7 +4764,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::PUT)
-                    .uri("/atree?x-id=CreateBucket")
+                    .uri("/abucket?x-id=CreateBucket")
                     .header(header::AUTHORIZATION, "Bearer root-test-key")
                     .body(Body::empty())
                     .unwrap(),
@@ -4774,7 +4778,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::HEAD)
-                    .uri("/atree")
+                    .uri("/abucket")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4785,7 +4789,7 @@ mod tests {
         let location = app
             .oneshot(
                 Request::builder()
-                    .uri("/atree?location=")
+                    .uri("/abucket?location=")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5358,7 +5362,7 @@ cache:
     async fn json_config_route_is_not_exposed() {
         let state = test_state();
         *state.config.write().await = ServiceConfig {
-            bucket: "atree".to_string(),
+            bucket: "abucket".to_string(),
             mounts: vec![MountConfig {
                 path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
@@ -5387,7 +5391,7 @@ cache:
     async fn help_route_is_not_supported() {
         let state = test_state();
         *state.config.write().await = ServiceConfig {
-            bucket: "atree".to_string(),
+            bucket: "abucket".to_string(),
             mounts: vec![MountConfig {
                 path: "/api/config.yaml".to_string(),
                 mount_type: "system_config".to_string(),
@@ -5452,7 +5456,7 @@ cache:
     async fn s3_root_list_includes_synthetic_mount_directories() {
         let state = test_state();
         *state.config.write().await = ServiceConfig {
-            bucket: "atree".to_string(),
+            bucket: "abucket".to_string(),
             mounts: vec![
                 MountConfig {
                     path: "/api/config.yaml".to_string(),
@@ -5519,7 +5523,7 @@ cache:
     #[test]
     fn hide_from_parent_suppresses_mount_in_parent_listing_only() {
         let config = ServiceConfig {
-            bucket: "atree".to_string(),
+            bucket: "abucket".to_string(),
             mounts: vec![
                 MountConfig {
                     path: "/api/config.yaml".to_string(),
@@ -5563,7 +5567,7 @@ cache:
     #[test]
     fn unauthorized_mount_is_suppressed_from_parent_s3_listing() {
         let config = ServiceConfig {
-            bucket: "atree".to_string(),
+            bucket: "abucket".to_string(),
             mounts: vec![
                 MountConfig {
                     path: "/".to_string(),
@@ -5656,7 +5660,7 @@ cache:
                 Request::builder()
                     .uri("/api/config.yaml")
                     .header(header::AUTHORIZATION, "Bearer root-test-key")
-                    .header(header::HOST, "atree.example.test")
+                    .header(header::HOST, "abucket.example.test")
                     .header("x-forwarded-proto", "https")
                     .body(Body::empty())
                     .unwrap(),
@@ -5665,9 +5669,9 @@ cache:
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_text(response).await;
-        assert!(body.contains("# `atree` is an S3-style file API"));
+        assert!(body.contains("# `abucket` is an S3-style file API"));
         assert!(body.contains("curl -H 'Authorization: Bearer <root-key>'"));
-        assert!(body.contains("https://atree.example.test/api/config.yaml"));
+        assert!(body.contains("https://abucket.example.test/api/config.yaml"));
         assert!(body.contains("curl -I -H 'Authorization: Bearer <key>'"));
         assert!(body.contains("-T ./example.txt"));
         assert!(body.contains("Accept: text/html"));

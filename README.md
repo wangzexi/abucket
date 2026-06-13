@@ -1,4 +1,4 @@
-# atree
+# abucket
 
 适合个人自托管且 AI 友好的文件树 S3 网关。
 
@@ -16,7 +16,7 @@ flowchart LR
   S["S3 storage"]
   C["/api/config.yaml"]
 
-  Q --> T["atree path tree"]
+  Q --> T["abucket path tree"]
   G --> T
   U --> T
   S --> T
@@ -33,10 +33,10 @@ flowchart LR
 ```bash
 docker run --rm \
   -p 9000:9000 \
-  -e ATREE_ROOT_KEY='RofCYxijYM' \
-  -e ATREE_DB='/data/atree.sqlite' \
-  -v atree-data:/data \
-  ghcr.io/wangzexi/atree:latest
+  -e ABUCKET_ROOT_KEY='RofCYxijYM' \
+  -e ABUCKET_DB='/data/abucket.sqlite' \
+  -v abucket-data:/data \
+  ghcr.io/wangzexi/abucket:latest
 ```
 
 ## 配置
@@ -52,7 +52,7 @@ curl -X PUT \
 ```
 
 ```yaml
-bucket: atree
+bucket: abucket
 mounts:
   - type: system_config
     path: /api/config.yaml
@@ -81,7 +81,7 @@ cache:
   ttl_seconds: 600
 ```
 
-内置用户有两个：`root` 来自 `ATREE_ROOT_KEY`，拥有管理入口；`anonymous` 是未带 key 的访问。它们都不用写进 `users`。`rules` 只授权；可写路径还需要实际可写 mount。
+内置用户有两个：`root` 来自 `ABUCKET_ROOT_KEY`（兼容 `ATREE_ROOT_KEY`），拥有管理入口；`anonymous` 是未带 key 的访问。它们都不用写进 `users`。`rules` 只授权；可写路径还需要实际可写 mount。
 
 完整配置注释由代码生成：看 `src/config.rs` 的 `config_yaml_comments()` 和 `validate_config()`。Mount 配置看 `src/mounts/*.rs`。
 

@@ -12,7 +12,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=build /app/target/release/atree /usr/local/bin/atree
+COPY --from=build /app/target/release/abucket /usr/local/bin/abucket
 
 ENV TZ=Asia/Shanghai
 ENV BIND=0.0.0.0:9000
@@ -21,4 +21,4 @@ RUN mkdir -p /data
 
 EXPOSE 9000
 
-ENTRYPOINT ["atree"]
+ENTRYPOINT ["abucket"]

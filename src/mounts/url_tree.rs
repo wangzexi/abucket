@@ -1,11 +1,11 @@
 //! URL Tree mount.
 //!
-//! This mount maps atree paths onto a remote URL prefix. It is intentionally
-//! thin: atree only joins paths, optionally applies a proxy, and streams the
+//! This mount maps abucket paths onto a remote URL prefix. It is intentionally
+//! thin: abucket only joins paths, optionally applies a proxy, and streams the
 //! target response back through the S3-compatible surface.
 //!
 //! Mount config:
-//! - `path`: atree directory exposed to users.
+//! - `path`: abucket directory exposed to users.
 //! - `root_path`: required upstream HTTP(S) URL prefix.
 //! - `options.proxy`: optional outbound proxy.
 //! - `options.size`: optional fixed file size for file-shaped URL mounts when

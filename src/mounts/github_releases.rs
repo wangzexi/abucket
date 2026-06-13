@@ -5,7 +5,7 @@
 //! `show_source_code` is enabled.
 //!
 //! Mount config:
-//! - `path`: atree directory where release assets appear.
+//! - `path`: abucket directory where release assets appear.
 //! - `root_path`: optional `owner/repo`; used when `options.repo` is omitted.
 //! - `options.repo`: optional `owner/repo`; preferred explicit repo field.
 //! - `options.token`: optional GitHub token for private repos or higher rate limits.
@@ -13,7 +13,7 @@
 //! - `options.show_source_code`: include GitHub source zip/tarball links.
 //! - `options.asset_allow`: optional asset names or `*` globs. String or list.
 //!
-//! Multiple `github_releases` mounts may share the same `path`; atree merges
+//! Multiple `github_releases` mounts may share the same `path`; abucket merges
 //! them into one flat release-asset directory.
 
 use anyhow::Result;
@@ -54,7 +54,7 @@ pub(crate) fn from_mount(mount: &config::MountConfig) -> Option<GithubReleasesCo
 
 pub(crate) fn client(config: &GithubReleasesConfig) -> Result<Client> {
     let mut builder = Client::builder()
-        .user_agent("atree/github-releases")
+        .user_agent("abucket/github-releases")
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(std::time::Duration::from_secs(120));
     if let Some(proxy_url) = config.proxy.as_deref() {

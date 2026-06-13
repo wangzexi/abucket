@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>atree</title>
+  <title>abucket</title>
   <style>
     :root { color-scheme: light; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     body { margin: 0; background: #ffffff; color: #111827; }
@@ -76,7 +76,7 @@
 <body>
   <header>
     <div class="brand-wrap">
-      <a class="brand" href="/">atree</a>
+      <a class="brand" href="/">abucket</a>
       <span class="tagline">S3-style file API</span>
     </div>
     <div class="auth">
@@ -97,7 +97,7 @@
   </main>
   <script>
     var CONFIG_PATH = __CONFIG_PATH_JSON__;
-    var keyName = 'atree_key';
+    var keyName = 'abucket_key';
     var keyInput = document.getElementById('keyInput');
     var rows = document.getElementById('rows');
     var crumbs = document.getElementById('crumbs');
@@ -418,7 +418,7 @@
       return null;
     }
     helpLine.innerHTML = '<pre><code>'
-      + 'bucket=atree\n'
+      + 'bucket=abucket\n'
       + "curl '" + escapeHtml(location.origin) + "/?list-type=2&delimiter=/'\n"
       + "curl -I '" + escapeHtml(location.origin) + "/release/yacd-gh-pages.zip'\n"
       + "curl -H 'Authorization: Bearer &lt;key&gt;' '" + escapeHtml(location.origin) + "/path/file.txt'\n"

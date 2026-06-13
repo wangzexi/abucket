@@ -4,7 +4,7 @@
 //! in config and uses path-style addressing for self-hosted or S3-like endpoints.
 //!
 //! Mount config:
-//! - `path`: atree directory exposed to users, such as `/public`.
+//! - `path`: abucket directory exposed to users, such as `/public`.
 //! - `root_path`: optional object key prefix inside the remote bucket. Omit it
 //!   to use the bucket root.
 //! - `options.endpoint`: required S3-compatible endpoint base URL.

@@ -5,17 +5,17 @@
 //! `https://api.oplist.org/quarkyun/renewapi`.
 //!
 //! When `app_id` and `sign_key` are already configured, that OpenList endpoint
-//! is enough to refresh tokens. When atree must learn `app_id`/`sign_key` from a
+//! is enough to refresh tokens. When abucket must learn `app_id`/`sign_key` from a
 //! refresh response, point `refresh_url` at the FnOS OAuth endpoint:
 //! `https://oauth.fnnas.com/api/v1/oauth/refreshToken`.
 //!
 //! Config lives in mount `options`: `refresh_token` is required; `access_token`,
 //! `app_id`, `sign_key`, `refresh_url`, and `root_fid` are optional strings.
-//! atree writes refreshed OAuth state back into the same mount options in
+//! abucket writes refreshed OAuth state back into the same mount options in
 //! `/api/config.yaml`.
 //!
 //! Mount config:
-//! - `path`: atree directory where Quark files appear.
+//! - `path`: abucket directory where Quark files appear.
 //! - `root_path`: Quark directory path, such as `/` or `/backup`.
 //! - `options.refresh_token`: required OAuth refresh token.
 //! - `options.access_token`: optional current access token; refreshed when empty or expired.
@@ -78,7 +78,7 @@ pub(crate) fn client(
         bail!("quark_open mount {path} needs options.refresh_token");
     }
     let http = Client::builder()
-        .user_agent("atree/quark-open")
+        .user_agent("abucket/quark-open")
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()?;
     Ok(QuarkOpenClient {

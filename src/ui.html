@@ -310,6 +310,10 @@
         progressText.textContent = '0%';
       }
     }
+    function setProgressIndeterminate(label) {
+      progressFill.style.width = '';
+      progressText.textContent = label || '准备中…';
+    }
     function updateProgress(received, total) {
       if (total > 0) {
         var pct = Math.min(Math.round(received / total * 100), 100);
@@ -346,43 +350,42 @@
     }
     function openFile(href, name) {
       renderStatus('加载文件...', false);
+      showProgress(true);
+      setProgressIndeterminate('准备中…');
       return fetch(href, { method: 'HEAD', headers: { Accept: '*/*' } })
         .then(function(head) {
           var contentType = (head.headers.get('content-type') || '').toLowerCase();
           if (head.ok && (looksInline(contentType) || looksInlinePath(href))) {
+            showProgress(false);
             location.href = href;
             return null;
           }
+          setProgressIndeterminate('下载中…');
           return fetch(href, { headers: headers('*/*') });
         })
         .then(function(res) {
           if (!res) return null;
           if (res.status === 403 || res.status === 401) {
+            showProgress(false);
             renderStatus('需要访问 key。', true);
             return null;
           }
           if (!res.ok) {
+            showProgress(false);
             renderStatus('文件失败：' + res.status, true);
             return null;
           }
           var contentType = (res.headers.get('content-type') || '').toLowerCase();
           var downloadName = fileNameFromDisposition(res.headers.get('content-disposition')) || fallbackFileName(href, name);
-          if (looksInline(contentType)) {
-            showProgress(true);
-            return streamResponse(res, updateProgress).then(function(buffer) {
-              showProgress(false);
-              var blob = new Blob([buffer], { type: contentType });
-              var objectUrl = blobToNamedObjectUrl(blob, contentType, downloadName);
-              return openInlinePreview(blob, objectUrl, contentType, downloadName).then(function() {
-                load();
-              });
-            });
-          }
-          showProgress(true);
           return streamResponse(res, updateProgress).then(function(buffer) {
             showProgress(false);
             var blob = new Blob([buffer], { type: contentType });
             var objectUrl = blobToNamedObjectUrl(blob, contentType, downloadName);
+            if (looksInline(contentType)) {
+              return openInlinePreview(blob, objectUrl, contentType, downloadName).then(function() {
+                load();
+              });
+            }
             var a = document.createElement('a');
             a.href = objectUrl;
             a.download = downloadName;

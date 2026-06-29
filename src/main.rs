@@ -27,12 +27,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
+use bytes::BytesMut;
 use base64::{Engine as _, engine::general_purpose};
 use config::{
     ServiceConfig, commented_yaml, config_db_path, hash_key, load_or_init_config, normalize_config,
     parse_config_yaml, save_config_to_db,
 };
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use reqwest::{Client, Proxy, Url};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -2929,7 +2930,7 @@ async fn github_releases_object_any(
 
 async fn github_release_get_cached(
     state: &AppState,
-    headers: &HeaderMap,
+    _headers: &HeaderMap,
     virtual_path: &str,
     url: &str,
     proxy: Option<&str>,
@@ -2953,22 +2954,80 @@ async fn github_release_get_cached(
             &format!("download returned {status}"),
         );
     }
-    let bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "DownloadError", &err.to_string()),
-    };
-    let cached = CachedObject {
-        meta: CacheMeta {
-            size: size.max(bytes.len() as i64) as u64,
-            modified,
-            fetched_at: chrono_millis(),
-            content_type: content_type.map(ToString::to_string),
-        },
-        bytes,
-    };
-    write_cached_object(state, virtual_path, &cached).await;
-    cached_object_response(cached, virtual_path, headers, false)
-        .unwrap_or_else(|err| s3_error_for(&err))
+    // Stream the upstream body to the client while collecting bytes for the
+    // cache. Previously this called `response.bytes().await`, which buffered
+    // the entire file server-side before the client saw a single byte — so the
+    // browser progress bar sat frozen at "下载中…" for large files.
+    let upstream_headers = response.headers().clone();
+    let collected: Arc<std::sync::Mutex<BytesMut>> =
+        Arc::new(std::sync::Mutex::new(BytesMut::new()));
+    let collected_for_cache = collected.clone();
+    let virtual_path = virtual_path.to_string();
+    let content_type = content_type.map(ToString::to_string);
+    let state = state.clone();
+    let stream = response
+        .bytes_stream()
+        .map(move |chunk| {
+            if let Ok(ref bytes) = chunk {
+                if let Ok(mut buf) = collected_for_cache.lock() {
+                    buf.extend_from_slice(bytes);
+                }
+            }
+            chunk.map_err(std::io::Error::other)
+        })
+        .chain(futures_util::stream::once({
+            let virtual_path = virtual_path.clone();
+            let content_type = content_type.clone();
+            async move {
+            // After the body finishes streaming, persist it to the cache.
+            let bytes = collected
+                .lock()
+                .map(|mut buf| buf.split().freeze())
+                .unwrap_or_default();
+            let cached = CachedObject {
+                meta: CacheMeta {
+                    size: size.max(bytes.len() as i64) as u64,
+                    modified,
+                    fetched_at: chrono_millis(),
+                    content_type: content_type.clone(),
+                },
+                bytes,
+            };
+            write_cached_object(&state, &virtual_path, &cached).await;
+            Ok::<Bytes, std::io::Error>(Bytes::new())
+            }
+        }));
+    let mut resp = Response::new(Body::from_stream(stream));
+    *resp.status_mut() = status;
+    for name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::CONTENT_RANGE,
+        header::LAST_MODIFIED,
+        header::ETAG,
+        header::CACHE_CONTROL,
+        header::ACCEPT_RANGES,
+        header::CONTENT_DISPOSITION,
+    ] {
+        if let Some(value) = upstream_headers.get(&name) {
+            resp.headers_mut().insert(name, value.clone());
+        }
+    }
+    // Prefer the known asset size/content-type from the release metadata when
+    // the upstream did not provide them, so the browser can show a real total.
+    if !resp.headers().contains_key(header::CONTENT_LENGTH)
+        && let Ok(value) = HeaderValue::from_str(&size.to_string())
+    {
+        resp.headers_mut().insert(header::CONTENT_LENGTH, value);
+    }
+    if let Some(ref content_type) = content_type
+        && !resp.headers().contains_key(header::CONTENT_TYPE)
+        && let Ok(value) = HeaderValue::from_str(content_type)
+    {
+        resp.headers_mut().insert(header::CONTENT_TYPE, value);
+    }
+    apply_browser_content_headers(&mut resp, &virtual_path);
+    resp
 }
 
 fn github_release_head_response(

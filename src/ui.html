@@ -18,6 +18,12 @@
     .crumbs { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 16px; line-height: 1.5; font-weight: 600; color: #9ca3af; }
     .crumbs a { color: #2563eb; text-decoration: none; }
     .crumbs a:hover { color: #1d4ed8; }
+    .progress-wrap { display: none; margin-bottom: 18px; padding: 16px 18px; border: 1px solid #e5e7eb; border-radius: 10px; background: #ffffff; }
+    .progress-wrap.visible { display: block; }
+    .progress-label { font-size: 13px; color: #374151; margin-bottom: 8px; }
+    .progress-bar { height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; position: relative; }
+    .progress-fill { height: 100%; width: 0%; background: #2563eb; border-radius: 4px; transition: width 0.2s ease; }
+    .progress-text { font-size: 12px; color: #6b7280; margin-top: 4px; text-align: right; }
     .table-wrap { border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; background: #ffffff; }
     table { width: 100%; border-collapse: collapse; }
     thead tr { background: #f9fafb; border-bottom: 1px solid #e5e7eb; }
@@ -86,6 +92,11 @@
   <main>
     <div class="bar">
       <nav id="crumbs" class="crumbs"></nav>
+    </div>
+    <div id="progressWrap" class="progress-wrap">
+      <div class="progress-label">下载中…</div>
+      <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+      <div id="progressText" class="progress-text">0%</div>
     </div>
     <div class="table-wrap">
       <table>
@@ -288,6 +299,51 @@
       writePreview('<iframe src="' + objectUrl + '" title="' + safeName + '"></iframe>');
       return Promise.resolve();
     }
+    var progressWrap = document.getElementById('progressWrap');
+    var progressFill = document.getElementById('progressFill');
+    var progressText = document.getElementById('progressText');
+
+    function showProgress(show) {
+      progressWrap.classList.toggle('visible', show);
+      if (!show) {
+        progressFill.style.width = '0%';
+        progressText.textContent = '0%';
+      }
+    }
+    function updateProgress(received, total) {
+      if (total > 0) {
+        var pct = Math.min(Math.round(received / total * 100), 100);
+        progressFill.style.width = pct + '%';
+        progressText.textContent = fmtBytes(received) + ' / ' + fmtBytes(total) + ' (' + pct + '%)';
+      } else {
+        progressFill.style.width = '';
+        progressText.textContent = fmtBytes(received) + ' …';
+      }
+    }
+    function streamResponse(res, onProgress) {
+      var contentLength = parseInt(res.headers.get('Content-Length') || '0', 10);
+      var reader = res.body.getReader();
+      var chunks = [];
+      var received = 0;
+      function pump() {
+        return reader.read().then(function(result) {
+          if (result.done) {
+            var full = new Uint8Array(received);
+            var pos = 0;
+            for (var i = 0; i < chunks.length; i += 1) {
+              full.set(chunks[i], pos);
+              pos += chunks[i].length;
+            }
+            return full.buffer;
+          }
+          chunks.push(result.value);
+          received += result.value.length;
+          onProgress(received, contentLength);
+          return pump();
+        });
+      }
+      return pump();
+    }
     function openFile(href, name) {
       renderStatus('加载文件...', false);
       return fetch(href, { method: 'HEAD', headers: { Accept: '*/*' } })
@@ -309,15 +365,24 @@
             renderStatus('文件失败：' + res.status, true);
             return null;
           }
-          return res.blob().then(function(blob) {
-            var contentType = (res.headers.get('content-type') || '').toLowerCase();
-            var downloadName = fileNameFromDisposition(res.headers.get('content-disposition')) || fallbackFileName(href, name);
-            var objectUrl = blobToNamedObjectUrl(blob, contentType, downloadName);
-            if (looksInline(contentType)) {
+          var contentType = (res.headers.get('content-type') || '').toLowerCase();
+          var downloadName = fileNameFromDisposition(res.headers.get('content-disposition')) || fallbackFileName(href, name);
+          if (looksInline(contentType)) {
+            showProgress(true);
+            return streamResponse(res, updateProgress).then(function(buffer) {
+              showProgress(false);
+              var blob = new Blob([buffer], { type: contentType });
+              var objectUrl = blobToNamedObjectUrl(blob, contentType, downloadName);
               return openInlinePreview(blob, objectUrl, contentType, downloadName).then(function() {
                 load();
               });
-            }
+            });
+          }
+          showProgress(true);
+          return streamResponse(res, updateProgress).then(function(buffer) {
+            showProgress(false);
+            var blob = new Blob([buffer], { type: contentType });
+            var objectUrl = blobToNamedObjectUrl(blob, contentType, downloadName);
             var a = document.createElement('a');
             a.href = objectUrl;
             a.download = downloadName;

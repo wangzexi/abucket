@@ -360,6 +360,17 @@
             location.href = href;
             return null;
           }
+          if (head.ok) {
+            showProgress(false);
+            var a = document.createElement('a');
+            a.href = href;
+            a.download = fallbackFileName(href, name);
+            document.body.appendChild(a);
+            a.click();
+            if (a.parentNode) a.parentNode.removeChild(a);
+            load();
+            return null;
+          }
           setProgressIndeterminate('下载中…');
           return fetch(href, { headers: headers('*/*') });
         })

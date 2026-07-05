@@ -27,7 +27,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
-use bytes::BytesMut;
 use base64::{Engine as _, engine::general_purpose};
 use config::{
     ServiceConfig, commented_yaml, config_db_path, hash_key, load_or_init_config, normalize_config,
@@ -2810,19 +2809,6 @@ async fn github_releases_object(
     if rest.is_empty() {
         return list_github_releases(state, None, &config, headers, "github_releases", "").await;
     }
-    if method == Method::GET
-        && !headers.contains_key(header::RANGE)
-        && let Some(cached) = read_cached_object(state, virtual_path).await
-    {
-        return cached_object_response(cached, virtual_path, headers, false)
-            .unwrap_or_else(|err| s3_error_for(&err));
-    }
-    if method == Method::HEAD
-        && let Some(cached) = read_cached_object(state, virtual_path).await
-    {
-        return cached_object_response(cached, virtual_path, headers, true)
-            .unwrap_or_else(|err| s3_error_for(&err));
-    }
     let release = match fetch_github_release_cached(state, &config).await {
         Ok(release) => release,
         Err(err) => return s3_error(StatusCode::BAD_GATEWAY, "GithubError", &err.to_string()),
@@ -2844,9 +2830,7 @@ async fn github_releases_object(
         };
     }
     if !headers.contains_key(header::RANGE) {
-        return github_release_get_cached(
-            state,
-            headers,
+        return github_release_get_streaming(
             virtual_path,
             &url,
             config.proxy.as_deref(),
@@ -2928,9 +2912,7 @@ async fn github_releases_object_any(
     s3_error(StatusCode::NOT_FOUND, "NoSuchKey", "object not found")
 }
 
-async fn github_release_get_cached(
-    state: &AppState,
-    _headers: &HeaderMap,
+async fn github_release_get_streaming(
     virtual_path: &str,
     url: &str,
     proxy: Option<&str>,
@@ -2954,50 +2936,12 @@ async fn github_release_get_cached(
             &format!("download returned {status}"),
         );
     }
-    // Stream the upstream body to the client while collecting bytes for the
-    // cache. Previously this called `response.bytes().await`, which buffered
-    // the entire file server-side before the client saw a single byte — so the
-    // browser progress bar sat frozen at "下载中…" for large files.
     let upstream_headers = response.headers().clone();
-    let collected: Arc<std::sync::Mutex<BytesMut>> =
-        Arc::new(std::sync::Mutex::new(BytesMut::new()));
-    let collected_for_cache = collected.clone();
     let virtual_path = virtual_path.to_string();
     let content_type = content_type.map(ToString::to_string);
-    let state = state.clone();
-    let stream = response
-        .bytes_stream()
-        .map(move |chunk| {
-            if let Ok(ref bytes) = chunk {
-                if let Ok(mut buf) = collected_for_cache.lock() {
-                    buf.extend_from_slice(bytes);
-                }
-            }
-            chunk.map_err(std::io::Error::other)
-        })
-        .chain(futures_util::stream::once({
-            let virtual_path = virtual_path.clone();
-            let content_type = content_type.clone();
-            async move {
-            // After the body finishes streaming, persist it to the cache.
-            let bytes = collected
-                .lock()
-                .map(|mut buf| buf.split().freeze())
-                .unwrap_or_default();
-            let cached = CachedObject {
-                meta: CacheMeta {
-                    size: size.max(bytes.len() as i64) as u64,
-                    modified,
-                    fetched_at: chrono_millis(),
-                    content_type: content_type.clone(),
-                },
-                bytes,
-            };
-            write_cached_object(&state, &virtual_path, &cached).await;
-            Ok::<Bytes, std::io::Error>(Bytes::new())
-            }
-        }));
-    let mut resp = Response::new(Body::from_stream(stream));
+    let mut resp = Response::new(Body::from_stream(
+        response.bytes_stream().map_err(std::io::Error::other),
+    ));
     *resp.status_mut() = status;
     for name in [
         header::CONTENT_TYPE,
@@ -3019,6 +2963,11 @@ async fn github_release_get_cached(
         && let Ok(value) = HeaderValue::from_str(&size.to_string())
     {
         resp.headers_mut().insert(header::CONTENT_LENGTH, value);
+    }
+    if !resp.headers().contains_key(header::LAST_MODIFIED)
+        && let Ok(value) = HeaderValue::from_str(&http_time(modified))
+    {
+        resp.headers_mut().insert(header::LAST_MODIFIED, value);
     }
     if let Some(ref content_type) = content_type
         && !resp.headers().contains_key(header::CONTENT_TYPE)
@@ -4635,6 +4584,54 @@ mod tests {
         let body = response_text(response).await;
         assert!(body.contains("<Prefix>hiddify/</Prefix>"));
         assert!(body.contains("<Key>hiddify/app.dmg</Key>"));
+    }
+
+    #[tokio::test]
+    async fn github_release_get_streams_before_upstream_finishes() {
+        async fn upstream() -> Response {
+            let stream = futures_util::stream::unfold(0u8, |state| async move {
+                if state == 0 {
+                    Some((Ok::<Bytes, std::io::Error>(Bytes::from_static(b"first")), 1))
+                } else {
+                    futures_util::future::pending().await
+                }
+            });
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream"),
+                    (header::CONTENT_LENGTH, "104857600"),
+                ],
+                Body::from_stream(stream),
+            )
+                .into_response()
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let app = Router::new().route("/asset.bin", any(upstream));
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let response = github_release_get_streaming(
+            "/external/asset.bin",
+            &format!("http://{addr}/asset.bin"),
+            None,
+            104857600,
+            1_700_000_000_000,
+            Some("application/octet-stream"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut stream = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("first downstream chunk should arrive before upstream completes")
+            .expect("body should yield a chunk")
+            .expect("chunk should be ok");
+        assert_eq!(first, Bytes::from_static(b"first"));
     }
 
     #[test]

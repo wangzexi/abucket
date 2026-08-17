@@ -73,7 +73,9 @@ struct CachedObject {
     meta: CacheMeta,
 }
 
-const QUARK_DIRECTORY_CACHE_TTL: Duration = Duration::from_secs(30);
+// Restic may issue thousands of object requests while a repository is stable.
+// Keep directory metadata long enough to avoid re-listing Quark for every pack.
+const QUARK_DIRECTORY_CACHE_TTL: Duration = Duration::from_secs(600);
 const QUARK_RATE_LIMIT_RETRIES: usize = 4;
 
 #[derive(Default)]

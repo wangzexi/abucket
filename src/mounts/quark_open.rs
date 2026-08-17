@@ -29,6 +29,7 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::{Result, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 use crate::mounts::options;
@@ -76,6 +77,7 @@ pub(crate) fn client(
     let http = Client::builder()
         .user_agent("abucket/quark-open")
         .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(30))
         .build()?;
     Ok(QuarkOpenClient {
         http,

@@ -4,7 +4,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 mod config;
@@ -55,6 +55,7 @@ struct AppState {
     root_key: Option<String>,
     cache_dir: PathBuf,
     multipart_dir: PathBuf,
+    quark_shared: Arc<QuarkOpenSharedState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +73,59 @@ struct CachedObject {
     meta: CacheMeta,
 }
 
+const QUARK_DIRECTORY_CACHE_TTL: Duration = Duration::from_secs(30);
+const QUARK_RATE_LIMIT_RETRIES: usize = 4;
+
+#[derive(Default)]
+pub(crate) struct QuarkOpenSharedState {
+    directories: Mutex<HashMap<String, QuarkDirectoryCacheEntry>>,
+    directory_refresh: Mutex<()>,
+    last_api_request: Mutex<Option<Instant>>,
+}
+
+struct QuarkDirectoryCacheEntry {
+    fetched_at: Instant,
+    files: Vec<QuarkFile>,
+}
+
+impl QuarkOpenSharedState {
+    async fn cached_directory(&self, key: &str) -> Option<Vec<QuarkFile>> {
+        let mut directories = self.directories.lock().await;
+        let entry = directories.get(key)?;
+        if entry.fetched_at.elapsed() >= QUARK_DIRECTORY_CACHE_TTL {
+            directories.remove(key);
+            return None;
+        }
+        Some(entry.files.clone())
+    }
+
+    async fn cache_directory(&self, key: String, files: Vec<QuarkFile>) {
+        self.directories.lock().await.insert(
+            key,
+            QuarkDirectoryCacheEntry {
+                fetched_at: Instant::now(),
+                files,
+            },
+        );
+    }
+
+    async fn clear_directories(&self) {
+        self.directories.lock().await.clear();
+    }
+
+    async fn wait_for_api_slot(&self) {
+        const MIN_API_INTERVAL: Duration = Duration::from_millis(250);
+        let mut last_request = self.last_api_request.lock().await;
+        if let Some(last) = *last_request {
+            let elapsed = last.elapsed();
+            if elapsed < MIN_API_INTERVAL {
+                sleep(MIN_API_INTERVAL - elapsed).await;
+            }
+        }
+        *last_request = Some(Instant::now());
+    }
+}
+
 #[derive(Clone)]
 struct QuarkOpenClient {
     http: Client,
@@ -79,6 +133,7 @@ struct QuarkOpenClient {
     db_path: PathBuf,
     service_config: Arc<RwLock<ServiceConfig>>,
     path: String,
+    shared: Arc<QuarkOpenSharedState>,
 }
 
 enum QuarkBackend {
@@ -423,59 +478,75 @@ impl QuarkOpenClient {
         body: Option<Value>,
         sign: Option<(String, String, String)>,
     ) -> Result<(Bytes, bool)> {
-        let (tm, token, req_id, app_id, access_token) = {
-            let config = self.config.lock().await;
-            let (tm, token, req_id) = sign.clone().unwrap_or_else(|| {
-                generate_open_req_sign(method.as_str(), pathname, &config.sign_key)
-            });
-            (
-                tm,
-                token,
-                req_id,
-                config.app_id.clone(),
-                config.access_token.clone(),
-            )
-        };
-        let mut req = self
-            .http
-            .request(method.clone(), format!("{OPEN_API}{pathname}"))
-            .header(header::ACCEPT, "application/json, text/plain, */*")
-            .header("x-pan-tm", tm)
-            .header("x-pan-token", token)
-            .header("x-pan-client-id", app_id)
-            .query(&[("req_id", req_id), ("access_token", access_token)]);
-        if let Some(body) = body.clone() {
-            req = req.json(&body);
+        let mut rate_limit_attempt = 0;
+        loop {
+            self.shared.wait_for_api_slot().await;
+            let (tm, token, req_id, app_id, access_token) = {
+                let config = self.config.lock().await;
+                let (tm, token, req_id) = sign.clone().unwrap_or_else(|| {
+                    generate_open_req_sign(method.as_str(), pathname, &config.sign_key)
+                });
+                (
+                    tm,
+                    token,
+                    req_id,
+                    config.app_id.clone(),
+                    config.access_token.clone(),
+                )
+            };
+            let mut req = self
+                .http
+                .request(method.clone(), format!("{OPEN_API}{pathname}"))
+                .header(header::ACCEPT, "application/json, text/plain, */*")
+                .header("x-pan-tm", tm)
+                .header("x-pan-token", token)
+                .header("x-pan-client-id", app_id)
+                .query(&[("req_id", req_id), ("access_token", access_token)]);
+            if let Some(body) = body.clone() {
+                req = req.json(&body);
+            }
+            let res = req.send().await?;
+            let status = res.status();
+            let bytes = res.bytes().await?;
+            let expired = if status == StatusCode::TOO_MANY_REQUESTS {
+                false
+            } else {
+                quark_open_response_expired(status, &bytes)?
+            };
+            if expired {
+                return Ok((bytes, true));
+            }
+            if quark_open_response_rate_limited(status, &bytes)
+                && rate_limit_attempt < QUARK_RATE_LIMIT_RETRIES
+            {
+                let delay = Duration::from_millis(500 * (1_u64 << rate_limit_attempt));
+                rate_limit_attempt += 1;
+                sleep(delay).await;
+                continue;
+            }
+            if !status.is_success() {
+                bail!(
+                    "quark open api http {}: {}",
+                    status,
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
+            let api: OpenStatus = serde_json::from_slice(&bytes).with_context(|| {
+                format!(
+                    "invalid quark open response: {}",
+                    String::from_utf8_lossy(&bytes)
+                )
+            })?;
+            if api.status >= 400 || api.errno != 0 {
+                bail!(
+                    "quark open api error status={} errno={}: {}",
+                    api.status,
+                    api.errno,
+                    api.error_info
+                );
+            }
+            return Ok((bytes, false));
         }
-        let res = req.send().await?;
-        let status = res.status();
-        let bytes = res.bytes().await?;
-        let expired = quark_open_response_expired(status, &bytes)?;
-        if expired {
-            return Ok((bytes, true));
-        }
-        if !status.is_success() {
-            bail!(
-                "quark open api http {}: {}",
-                status,
-                String::from_utf8_lossy(&bytes)
-            );
-        }
-        let api: OpenStatus = serde_json::from_slice(&bytes).with_context(|| {
-            format!(
-                "invalid quark open response: {}",
-                String::from_utf8_lossy(&bytes)
-            )
-        })?;
-        if api.status >= 400 || api.errno != 0 {
-            bail!(
-                "quark open api error status={} errno={}: {}",
-                api.status,
-                api.errno,
-                api.error_info
-            );
-        }
-        Ok((bytes, false))
     }
 
     async fn needs_initial_refresh(&self) -> bool {
@@ -589,6 +660,20 @@ impl QuarkOpenClient {
     }
 
     async fn list_files(&self, parent_fid: &str) -> Result<Vec<QuarkFile>> {
+        let cache_key = format!("{}:{parent_fid}", self.path);
+        if let Some(files) = self.shared.cached_directory(&cache_key).await {
+            return Ok(files);
+        }
+        let _refresh = self.shared.directory_refresh.lock().await;
+        if let Some(files) = self.shared.cached_directory(&cache_key).await {
+            return Ok(files);
+        }
+        let files = self.list_files_uncached(parent_fid).await?;
+        self.shared.cache_directory(cache_key, files.clone()).await;
+        Ok(files)
+    }
+
+    async fn list_files_uncached(&self, parent_fid: &str) -> Result<Vec<QuarkFile>> {
         let mut files = Vec::new();
         let mut cursor: Option<OpenQueryCursor> = None;
         loop {
@@ -625,6 +710,7 @@ impl QuarkOpenClient {
             })),
         )
         .await?;
+        self.shared.clear_directories().await;
         Ok(())
     }
 
@@ -659,7 +745,8 @@ impl QuarkOpenClient {
         let (dir, name) = split_key(key);
         let parent = match self.resolve_dir(dir, false).await {
             Ok(fid) => fid,
-            Err(_) => return Ok(None),
+            Err(err) if is_missing_directory_error(&err) => return Ok(None),
+            Err(err) => return Err(err),
         };
         let files = self.list_files(&parent).await?;
         Ok(files.into_iter().find(|f| f.file_name == name))
@@ -697,6 +784,7 @@ impl QuarkOpenClient {
             })),
         )
         .await?;
+        self.shared.clear_directories().await;
         Ok(())
     }
 
@@ -819,6 +907,7 @@ impl QuarkOpenClient {
         if !finish.data.finish {
             bail!("quark open upload finish did not complete");
         }
+        self.shared.clear_directories().await;
         self.wait_until_visible(key, body.len() as i64).await
     }
 
@@ -877,6 +966,7 @@ async fn main() -> Result<()> {
         root_key,
         cache_dir,
         multipart_dir,
+        quark_shared: Arc::new(QuarkOpenSharedState::default()),
     };
     let app = build_app(state);
     let listener = TcpListener::bind(bind).await?;
@@ -1235,6 +1325,7 @@ async fn object_handler(
                 &path,
                 state.db_path.clone(),
                 state.config.clone(),
+                state.quark_shared.clone(),
             ) {
                 Ok(quark) => quark,
                 Err(err) => {
@@ -1457,6 +1548,7 @@ async fn list_objects(
                 &path,
                 state.db_path.clone(),
                 state.config.clone(),
+                state.quark_shared.clone(),
             ) {
                 Ok(quark) => quark,
                 Err(err) => {
@@ -1565,7 +1657,7 @@ async fn list_objects(
 
     let parent = match backend.resolve_dir(&remote_dir, false).await {
         Ok(fid) => fid,
-        Err(_) => {
+        Err(err) if is_missing_directory_error(&err) => {
             return list_xml_cached(
                 &state,
                 &list_cache_key,
@@ -1579,6 +1671,7 @@ async fn list_objects(
             )
             .await;
         }
+        Err(err) => return s3_error_for(&err),
     };
     let recursive = delimiter.as_deref() != Some("/");
     let files = match list_files_for_s3(&backend, &parent, &dir_path, recursive).await {
@@ -2547,6 +2640,7 @@ async fn invalidate_cached_object(state: &AppState, virtual_path: &str) {
 async fn clear_cache_dir(state: &AppState) {
     let _ = tokio::fs::remove_dir_all(&state.cache_dir).await;
     let _ = tokio::fs::create_dir_all(&state.cache_dir).await;
+    state.quark_shared.clear_directories().await;
 }
 
 async fn read_cached_json<T>(state: &AppState, cache_key: &str) -> Option<T>
@@ -3512,9 +3606,14 @@ async fn browser_directory(
         return html();
     }
     let config = state.config.read().await;
-    let Some((remote_key, backend)) = resolve_mount(&config, &index_path)
-        .and_then(|mount| backend_from_mount(state.db_path.clone(), state.config.clone(), mount))
-    else {
+    let Some((remote_key, backend)) = resolve_mount(&config, &index_path).and_then(|mount| {
+        backend_from_mount(
+            state.db_path.clone(),
+            state.config.clone(),
+            state.quark_shared.clone(),
+            mount,
+        )
+    }) else {
         return html();
     };
     match get_object_cached(state, &backend, &index_path, &remote_key, headers).await {
@@ -3547,6 +3646,7 @@ async fn browser_directory_index(
                     &path,
                     state.db_path.clone(),
                     state.config.clone(),
+                    state.quark_shared.clone(),
                 )
                 .ok()?,
             );
@@ -3582,6 +3682,7 @@ async fn find_directory_index(state: &AppState, virtual_path: &str) -> Option<St
     let (remote_key, backend) = backend_from_mount(
         state.db_path.clone(),
         state.config.clone(),
+        state.quark_shared.clone(),
         resolve_mount(&config, &format!("/{prefix}"))?,
     )?;
     drop(config);
@@ -4105,6 +4206,19 @@ fn quark_open_response_expired(status: StatusCode, bytes: &Bytes) -> Result<bool
         && (api.errno == 11001 || (api.errno == 14001 && api.error_info.contains("access_token"))))
 }
 
+fn quark_open_response_rate_limited(status: StatusCode, bytes: &Bytes) -> bool {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return true;
+    }
+    serde_json::from_slice::<OpenStatus>(bytes)
+        .map(|api| api.errno == 429)
+        .unwrap_or(false)
+}
+
+fn is_missing_directory_error(err: &anyhow::Error) -> bool {
+    err.to_string().starts_with("directory not found:")
+}
+
 fn split_key(key: &str) -> (&str, &str) {
     let key = key.trim_matches('/');
     key.rsplit_once('/').unwrap_or(("", key))
@@ -4266,6 +4380,7 @@ mod tests {
                 multipart_dir,
                 db_path,
                 root_key: Some("root-test-key".to_string()),
+                quark_shared: Arc::new(QuarkOpenSharedState::default()),
             },
         }
     }
@@ -4397,6 +4512,19 @@ mod tests {
     fn quark_open_expired_response_is_detected_even_on_http_400() {
         let body = Bytes::from(r#"{"status":-1,"errno":11001,"error_info":"Access Token无效"}"#);
         assert!(quark_open_response_expired(StatusCode::BAD_REQUEST, &body).unwrap());
+    }
+
+    #[test]
+    fn quark_open_rate_limit_is_detected_from_api_error() {
+        let body = Bytes::from(r#"{"status":-1,"errno":429,"error_info":"限流"}"#);
+        assert!(quark_open_response_rate_limited(
+            StatusCode::BAD_REQUEST,
+            &body
+        ));
+        assert!(quark_open_response_rate_limited(
+            StatusCode::TOO_MANY_REQUESTS,
+            &Bytes::from_static(b"rate limited")
+        ));
     }
 
     #[test]

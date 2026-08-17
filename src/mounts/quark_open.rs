@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::mounts::options;
-use crate::{QuarkOpenClient, config};
+use crate::{QuarkOpenClient, QuarkOpenSharedState, config};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct QuarkOpenConfig {
@@ -68,6 +68,7 @@ pub(crate) fn client(
     path: &str,
     db_path: PathBuf,
     service_config: Arc<RwLock<config::ServiceConfig>>,
+    shared: Arc<QuarkOpenSharedState>,
 ) -> Result<QuarkOpenClient> {
     if config.refresh_token.trim().is_empty() {
         bail!("quark_open mount {path} needs options.refresh_token");
@@ -82,5 +83,6 @@ pub(crate) fn client(
         db_path,
         service_config,
         path: path.to_string(),
+        shared,
     })
 }

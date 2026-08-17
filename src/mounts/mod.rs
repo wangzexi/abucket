@@ -12,9 +12,7 @@ pub(crate) mod system_config;
 pub(crate) mod url_tree;
 
 pub(crate) use github_releases::{GithubReleasesConfig, client as github_client};
-pub(crate) use quark_open::{
-    QuarkOpenConfig, client as quark_open_client, is_fnnas_quark_refresh_url,
-};
+pub(crate) use quark_open::{QuarkOpenConfig, client as quark_open_client};
 pub(crate) use s3::S3Config;
 
 #[derive(Debug, Clone)]

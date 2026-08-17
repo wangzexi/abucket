@@ -15,8 +15,7 @@ mod ui;
 use crate::mounts::resolve_remote_key;
 use crate::mounts::{
     GithubReleasesConfig, QuarkOpenConfig, ResolvedMount, S3Config, backend_from_mount,
-    github_client, is_fnnas_quark_refresh_url, quark_open_client, resolve_github_release_mounts,
-    resolve_mount,
+    github_client, quark_open_client, resolve_github_release_mounts, resolve_mount,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
@@ -549,49 +548,34 @@ impl QuarkOpenClient {
         refresh_url: &str,
         refresh_token: &str,
     ) -> Result<OpenRefreshResp> {
-        if is_fnnas_quark_refresh_url(refresh_url) {
-            let resp: DirectOpenRefreshResp = self
-                .http
-                .post(refresh_url)
-                .json(&json!({
-                    "authType": 4,
-                    "refreshToken": refresh_token,
-                    "trimAppId": "com.trim.cloudstorage",
-                }))
-                .send()
-                .await?
-                .json()
-                .await?;
-            let Some(data) = resp.data else {
-                return Ok(OpenRefreshResp {
-                    refresh_token: String::new(),
-                    access_token: String::new(),
-                    app_id: String::new(),
-                    sign_key: String::new(),
-                    error_message: resp.msg,
-                });
-            };
-            return Ok(OpenRefreshResp {
-                refresh_token: data.token_info.refresh_token,
-                access_token: data.token_info.access_token,
-                app_id: data.token_info.app_id,
-                sign_key: data.token_info.sign_key,
-                error_message: resp.msg,
-            });
-        }
-
-        Ok(self
+        let resp: DirectOpenRefreshResp = self
             .http
-            .get(refresh_url)
-            .query(&[
-                ("refresh_ui", refresh_token.to_string()),
-                ("server_use", "true".to_string()),
-                ("driver_txt", "quarkyun_oa".to_string()),
-            ])
+            .post(refresh_url)
+            .json(&json!({
+                "authType": 4,
+                "refreshToken": refresh_token,
+                "trimAppId": "com.trim.cloudstorage",
+            }))
             .send()
             .await?
             .json()
-            .await?)
+            .await?;
+        let Some(data) = resp.data else {
+            return Ok(OpenRefreshResp {
+                refresh_token: String::new(),
+                access_token: String::new(),
+                app_id: String::new(),
+                sign_key: String::new(),
+                error_message: resp.msg,
+            });
+        };
+        Ok(OpenRefreshResp {
+            refresh_token: data.token_info.refresh_token,
+            access_token: data.token_info.access_token,
+            app_id: data.token_info.app_id,
+            sign_key: data.token_info.sign_key,
+            error_message: resp.msg,
+        })
     }
 
     async fn user_id(&self) -> Result<String> {
@@ -4246,7 +4230,7 @@ mod tests {
                 "refresh_token": "test-refresh-token",
                 "app_id": "test-app-id",
                 "sign_key": "test-sign-key",
-                "refresh_url": "https://api.oplist.org/quarkyun/renewapi",
+                "refresh_url": "https://oauth.fnnas.com/api/v1/oauth/refreshToken",
                 "root_fid": "0",
             }),
         }

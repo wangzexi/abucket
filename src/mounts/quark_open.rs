@@ -1,12 +1,7 @@
 //! QuarkOpen mount.
 //!
-//! This mount uses Quark Drive through its open-api shape. The default
-//! refresh endpoint follows OpenList's `drivers/quark_open` behavior:
-//! `https://api.oplist.org/quarkyun/renewapi`.
-//!
-//! When `app_id` and `sign_key` are already configured, that OpenList endpoint
-//! is enough to refresh tokens. When abucket must learn `app_id`/`sign_key` from a
-//! refresh response, point `refresh_url` at the FnOS OAuth endpoint:
+//! This mount uses Quark Drive through its open-api shape. Token refresh uses
+//! the same FnNAS endpoint as OpenList's official API service:
 //! `https://oauth.fnnas.com/api/v1/oauth/refreshToken`.
 //!
 //! Config lives in mount `options`: `refresh_token` is required; `access_token`,
@@ -32,7 +27,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Result, bail};
-use reqwest::{Client, Url};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -63,7 +58,7 @@ pub(crate) fn from_mount(mount: &config::MountConfig) -> Option<QuarkOpenConfig>
         app_id: options::string(&mount.options, "app_id").unwrap_or_default(),
         sign_key: options::string(&mount.options, "sign_key").unwrap_or_default(),
         refresh_url: options::string(&mount.options, "refresh_url")
-            .unwrap_or_else(|| "https://api.oplist.org/quarkyun/renewapi".to_string()),
+            .unwrap_or_else(|| "https://oauth.fnnas.com/api/v1/oauth/refreshToken".to_string()),
         root_fid: options::string(&mount.options, "root_fid").unwrap_or_else(|| "0".to_string()),
     })
 }
@@ -88,11 +83,4 @@ pub(crate) fn client(
         service_config,
         path: path.to_string(),
     })
-}
-
-pub(crate) fn is_fnnas_quark_refresh_url(refresh_url: &str) -> bool {
-    let Ok(url) = Url::parse(refresh_url) else {
-        return false;
-    };
-    matches!(url.host_str(), Some("oauth.fnnas.com")) && url.path() == "/api/v1/oauth/refreshToken"
 }

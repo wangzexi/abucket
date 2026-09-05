@@ -77,6 +77,7 @@ struct CachedObject {
 // Keep directory metadata long enough to avoid re-listing Quark for every pack.
 const QUARK_DIRECTORY_CACHE_TTL: Duration = Duration::from_secs(600);
 const QUARK_RATE_LIMIT_RETRIES: usize = 4;
+const QUARK_UPLOAD_PART_RETRIES: usize = 5;
 
 #[derive(Default)]
 pub(crate) struct QuarkOpenSharedState {
@@ -859,34 +860,59 @@ impl QuarkOpenClient {
                 .upload_urls
                 .get(etags.len())
                 .ok_or_else(|| anyhow!("missing upload URL for part {}", etags.len() + 1))?;
-            let res = self
-                .http
-                .put(&info.upload_url)
-                .header(header::AUTHORIZATION, &info.signature_info.signature)
-                .header("X-Oss-Date", &urls.data.common_headers.x_oss_date)
-                .header(
-                    "X-Oss-Content-Sha256",
-                    &urls.data.common_headers.x_oss_content_sha256,
-                )
-                .header(header::ACCEPT_ENCODING, "gzip")
-                .body(Bytes::copy_from_slice(chunk))
-                .send()
-                .await?;
-            if !res.status().is_success() {
-                bail!(
-                    "quark open upload part {} failed {}: {}",
-                    info.part_number,
-                    res.status(),
-                    res.text().await?
+            let mut attempt = 0;
+            let etag = loop {
+                let result = self
+                    .http
+                    .put(&info.upload_url)
+                    .timeout(Duration::from_secs(120))
+                    .header(header::AUTHORIZATION, &info.signature_info.signature)
+                    .header("X-Oss-Date", &urls.data.common_headers.x_oss_date)
+                    .header(
+                        "X-Oss-Content-Sha256",
+                        &urls.data.common_headers.x_oss_content_sha256,
+                    )
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Bytes::copy_from_slice(chunk))
+                    .send()
+                    .await;
+
+                let failure = match result {
+                    Ok(res) if res.status().is_success() => {
+                        break res
+                            .headers()
+                            .get(header::ETAG)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                    }
+                    Ok(res) => {
+                        let status = res.status();
+                        let text = res.text().await.unwrap_or_default();
+                        format!("HTTP {status}: {text}")
+                    }
+                    Err(err) => err.to_string(),
+                };
+
+                if attempt >= QUARK_UPLOAD_PART_RETRIES {
+                    bail!(
+                        "quark open upload part {} failed after {} attempts: {}",
+                        info.part_number,
+                        attempt + 1,
+                        failure
+                    );
+                }
+                attempt += 1;
+                let delay = Duration::from_secs(1 << (attempt - 1));
+                warn!(
+                    part = info.part_number,
+                    attempt,
+                    error = %failure,
+                    "retrying Quark upload part"
                 );
-            }
-            etags.push(
-                res.headers()
-                    .get(header::ETAG)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string(),
-            );
+                sleep(delay).await;
+            };
+            etags.push(etag);
         }
         let part_info_list = part_info
             .into_iter()

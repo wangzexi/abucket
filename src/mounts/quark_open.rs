@@ -18,6 +18,7 @@
 //! - `options.sign_key`: optional request signing key; required after refresh.
 //! - `options.refresh_url`: optional token refresh endpoint.
 //! - `options.root_fid`: optional Quark folder id cache; defaults to `0`.
+//! - `options.proxy`: optional HTTP or SOCKS proxy for Quark API and OSS traffic.
 //!
 //! OpenList reference:
 //! - OpenList driver path: `drivers/quark_open`
@@ -27,7 +28,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Result, bail};
-use reqwest::Client;
+use reqwest::{Client, Proxy};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -50,6 +51,9 @@ pub(crate) struct QuarkOpenConfig {
     /// Quark folder id for the configured `root_path`; `0` means account root.
     #[serde(default)]
     pub(crate) root_fid: String,
+    /// Optional proxy for Quark API calls and upload/download requests.
+    #[serde(default)]
+    pub(crate) proxy: String,
 }
 
 pub(crate) fn from_mount(mount: &config::MountConfig) -> Option<QuarkOpenConfig> {
@@ -61,6 +65,7 @@ pub(crate) fn from_mount(mount: &config::MountConfig) -> Option<QuarkOpenConfig>
         refresh_url: options::string(&mount.options, "refresh_url")
             .unwrap_or_else(|| "https://oauth.fnnas.com/api/v1/oauth/refreshToken".to_string()),
         root_fid: options::string(&mount.options, "root_fid").unwrap_or_else(|| "0".to_string()),
+        proxy: options::string(&mount.options, "proxy").unwrap_or_default(),
     })
 }
 
@@ -74,11 +79,14 @@ pub(crate) fn client(
     if config.refresh_token.trim().is_empty() {
         bail!("quark_open mount {path} needs options.refresh_token");
     }
-    let http = Client::builder()
+    let mut http = Client::builder()
         .user_agent("abucket/quark-open")
         .redirect(reqwest::redirect::Policy::limited(10))
-        .timeout(Duration::from_secs(30))
-        .build()?;
+        .timeout(Duration::from_secs(30));
+    if !config.proxy.trim().is_empty() {
+        http = http.proxy(Proxy::all(&config.proxy)?);
+    }
+    let http = http.build()?;
     Ok(QuarkOpenClient {
         http,
         config: std::sync::Arc::new(tokio::sync::Mutex::new(config)),

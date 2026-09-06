@@ -28,8 +28,8 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use config::{
-    ServiceConfig, commented_yaml, config_db_path, hash_key, load_or_init_config, normalize_config,
-    parse_config_yaml, save_config_to_db,
+    ServiceConfig, commented_yaml, config_path, hash_key, load_or_init_config, normalize_config,
+    parse_config_yaml, save_config_to_file,
 };
 use futures_util::{StreamExt, TryStreamExt};
 use reqwest::{Client, Proxy, Url};
@@ -613,7 +613,7 @@ impl QuarkOpenClient {
             bail!("quark_open mount {} no longer exists", self.path);
         };
         mount.options = serde_json::to_value(snapshot)?;
-        save_config_to_db(&self.db_path, &service_config)?;
+        save_config_to_file(&self.db_path, &service_config)?;
         Ok(())
     }
 
@@ -972,12 +972,13 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let db_path = config_db_path()?;
+    let db_path = config_path()?;
     let multipart_dir = multipart_dir_path();
     std::fs::create_dir_all(&multipart_dir)?;
     let cache_dir = cache_dir_path();
     std::fs::create_dir_all(&cache_dir)?;
     let config = load_or_init_config(&db_path)?;
+    info!(config = %db_path.display(), "loaded abucket configuration");
     let root_key = env::var("ABUCKET_ROOT_KEY")
         .ok()
         .or_else(|| env::var("ATREE_ROOT_KEY").ok());
@@ -1208,7 +1209,7 @@ async fn config_handler(
                 Ok(config) => config,
                 Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
             };
-            if let Err(err) = save_config_to_db(&state.db_path, &config) {
+            if let Err(err) = save_config_to_file(&state.db_path, &config) {
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
             }
             *state.config.write().await = config.clone();
@@ -4471,7 +4472,7 @@ mod tests {
     #[test]
     fn empty_db_is_initialized_with_default_config() {
         let root = TestDir::new("abucket-default-config");
-        let db_path = root.join("abucket.sqlite");
+        let db_path = root.join("config.yaml");
 
         let config = load_or_init_config(&db_path).unwrap();
 

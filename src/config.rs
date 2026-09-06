@@ -6,12 +6,11 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use reqwest::Url;
-use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{chrono_millis, mounts::normalize_virtual_path};
+use crate::mounts::normalize_virtual_path;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ServiceConfig {
@@ -115,58 +114,63 @@ fn default_bucket() -> String {
     "abucket".to_string()
 }
 
-pub(crate) fn config_db_path() -> Result<PathBuf> {
-    if let Ok(path) = env::var("ABUCKET_DB").or_else(|_| env::var("ATREE_DB")) {
+pub(crate) fn config_path() -> Result<PathBuf> {
+    if let Ok(path) = env::var("ABUCKET_CONFIG") {
         return Ok(PathBuf::from(path));
     }
-    let home = env::var("HOME").context("HOME is required when neither ABUCKET_DB nor ATREE_DB is set")?;
+    let home = env::var("HOME").context("HOME is required when ABUCKET_CONFIG is not set")?;
     Ok(PathBuf::from(home)
         .join(".local")
         .join("share")
         .join("abucket")
-        .join("abucket.sqlite"))
+        .join("config.yaml"))
 }
 
 pub(crate) fn mount_root_path(mount: &MountConfig) -> &str {
     mount.root_path.as_deref().unwrap_or("")
 }
 
-pub(crate) fn load_or_init_config(db_path: &Path) -> Result<ServiceConfig> {
-    if let Some(parent) = db_path.parent() {
+pub(crate) fn load_or_init_config(config_path: &Path) -> Result<ServiceConfig> {
+    if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(db_path)?;
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS config (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            json TEXT NOT NULL,
-            updated_at INTEGER NOT NULL
-        )",
-        [],
-    )?;
-    let existing: Option<String> = conn
-        .query_row("SELECT json FROM config WHERE id = 1", [], |row| row.get(0))
-        .ok();
-    if let Some(raw) = existing {
-        let config = normalize_config(serde_json::from_str(&raw)?)?;
-        save_config_to_db(db_path, &config)?;
+    if config_path.exists() {
+        let raw = std::fs::read(config_path)
+            .with_context(|| format!("failed to read config {}", config_path.display()))?;
+        let config = normalize_config(parse_config_yaml(&raw)?)?;
         return Ok(config);
     }
     let config = normalize_config(ServiceConfig::default())?;
-    save_config_to_db(db_path, &config)?;
+    save_config_to_file(config_path, &config)?;
     Ok(config)
 }
 
-pub(crate) fn save_config_to_db(db_path: &Path, config: &ServiceConfig) -> Result<()> {
-    let conn = Connection::open(db_path)?;
-    let raw = serde_json::to_string_pretty(config)?;
-    conn.execute(
-        "INSERT INTO config (id, json, updated_at) VALUES (1, ?1, ?2)
-         ON CONFLICT(id) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at",
-        params![raw, chrono_millis()],
-    )?;
+pub(crate) fn save_config_to_file(config_path: &Path, config: &ServiceConfig) -> Result<()> {
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let raw = serde_yaml::to_string(config)?;
+    let tmp = config_path.with_extension("yaml.tmp");
+    std::fs::write(&tmp, raw.as_bytes())?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&tmp)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, config_path)
+        .with_context(|| format!("failed to replace config {}", config_path.display()))?;
     Ok(())
 }
+
+pub(crate) fn parse_config_yaml(bytes: &[u8]) -> Result<ServiceConfig> {
+    Ok(serde_yaml::from_slice(bytes)?)
+}
+
+/*
+ * The configuration is intentionally a single YAML document. Keep the
+ * persistence boundary here so runtime updates and token refreshes use the
+ * same atomic write path.
+ */
 
 pub(crate) fn normalize_config(mut config: ServiceConfig) -> Result<ServiceConfig> {
     if config.bucket == "atree" {
@@ -189,10 +193,6 @@ pub(crate) fn normalize_config(mut config: ServiceConfig) -> Result<ServiceConfi
     }
     validate_config(&config)?;
     Ok(config)
-}
-
-pub(crate) fn parse_config_yaml(bytes: &[u8]) -> Result<ServiceConfig> {
-    Ok(serde_yaml::from_slice(bytes)?)
 }
 
 pub(crate) fn commented_yaml(

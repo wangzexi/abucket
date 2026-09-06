@@ -34,12 +34,15 @@ flowchart LR
 docker run --rm \
   -p 9000:9000 \
   -e ABUCKET_ROOT_KEY='RofCYxijYM' \
-  -e ABUCKET_DB='/data/abucket.sqlite' \
+  -e ABUCKET_CONFIG='/data/config.yaml' \
   -v abucket-data:/data \
   ghcr.io/wangzexi/abucket:latest
 ```
 
 ## 配置
+
+配置文件由 `ABUCKET_CONFIG` 指定；文件不存在时会生成默认 YAML 配置。运行中的
+配置通过 `/api/config.yaml` 读取和更新，Quark token 刷新后也会写回同一个文件。
 
 ```bash
 curl -H 'Authorization: Bearer <root-key>' \

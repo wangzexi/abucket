@@ -979,9 +979,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cache_dir)?;
     let config = load_or_init_config(&config_file_path)?;
     info!(config = %config_file_path.display(), "loaded abucket configuration");
-    let root_key = env::var("ABUCKET_ROOT_KEY")
-        .ok()
-        .or_else(|| env::var("ATREE_ROOT_KEY").ok());
+    let root_key = env::var("ABUCKET_ROOT_KEY").ok();
     if root_key.is_none() {
         warn!("ABUCKET_ROOT_KEY is not set; only explicit auth rules will grant access");
     }
@@ -1007,14 +1005,12 @@ async fn main() -> Result<()> {
 fn multipart_dir_path() -> PathBuf {
     env::var("ABUCKET_MULTIPART_DIR")
         .map(PathBuf::from)
-        .or_else(|_| env::var("ATREE_MULTIPART_DIR").map(PathBuf::from))
         .unwrap_or_else(|_| env::temp_dir().join("abucket").join("multipart"))
 }
 
 fn cache_dir_path() -> PathBuf {
     env::var("ABUCKET_CACHE_DIR")
         .map(PathBuf::from)
-        .or_else(|_| env::var("ATREE_CACHE_DIR").map(PathBuf::from))
         .unwrap_or_else(|_| env::temp_dir().join("abucket").join("cache"))
 }
 

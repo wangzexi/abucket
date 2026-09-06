@@ -133,7 +133,7 @@ pub(crate) fn resolve_github_release_mounts(
 }
 
 pub(crate) fn backend_from_mount(
-    db_path: PathBuf,
+    config_file_path: PathBuf,
     service_config: Arc<RwLock<config::ServiceConfig>>,
     shared: Arc<QuarkOpenSharedState>,
     mount: ResolvedMount,
@@ -146,7 +146,7 @@ pub(crate) fn backend_from_mount(
         } => Some((
             remote_key,
             QuarkBackend::Open(
-                quark_open::client(config, &path, db_path, service_config, shared).ok()?,
+                quark_open::client(config, &path, config_file_path, service_config, shared).ok()?,
             ),
         )),
         _ => None,

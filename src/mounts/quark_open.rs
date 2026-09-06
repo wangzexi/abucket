@@ -72,7 +72,7 @@ pub(crate) fn from_mount(mount: &config::MountConfig) -> Option<QuarkOpenConfig>
 pub(crate) fn client(
     config: QuarkOpenConfig,
     path: &str,
-    db_path: PathBuf,
+    config_file_path: PathBuf,
     service_config: Arc<RwLock<config::ServiceConfig>>,
     shared: Arc<QuarkOpenSharedState>,
 ) -> Result<QuarkOpenClient> {
@@ -90,7 +90,7 @@ pub(crate) fn client(
     Ok(QuarkOpenClient {
         http,
         config: std::sync::Arc::new(tokio::sync::Mutex::new(config)),
-        db_path,
+        config_file_path,
         service_config,
         path: path.to_string(),
         shared,

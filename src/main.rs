@@ -51,7 +51,7 @@ const OPEN_API: &str = "https://open-api-drive.quark.cn";
 #[derive(Clone)]
 struct AppState {
     config: Arc<RwLock<ServiceConfig>>,
-    db_path: PathBuf,
+    config_file_path: PathBuf,
     root_key: Option<String>,
     cache_dir: PathBuf,
     multipart_dir: PathBuf,
@@ -133,7 +133,7 @@ impl QuarkOpenSharedState {
 struct QuarkOpenClient {
     http: Client,
     config: Arc<Mutex<QuarkOpenConfig>>,
-    db_path: PathBuf,
+    config_file_path: PathBuf,
     service_config: Arc<RwLock<ServiceConfig>>,
     path: String,
     shared: Arc<QuarkOpenSharedState>,
@@ -613,7 +613,7 @@ impl QuarkOpenClient {
             bail!("quark_open mount {} no longer exists", self.path);
         };
         mount.options = serde_json::to_value(snapshot)?;
-        save_config_to_file(&self.db_path, &service_config)?;
+        save_config_to_file(&self.config_file_path, &service_config)?;
         Ok(())
     }
 
@@ -972,13 +972,13 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let db_path = config_path()?;
+    let config_file_path = config_path()?;
     let multipart_dir = multipart_dir_path();
     std::fs::create_dir_all(&multipart_dir)?;
     let cache_dir = cache_dir_path();
     std::fs::create_dir_all(&cache_dir)?;
-    let config = load_or_init_config(&db_path)?;
-    info!(config = %db_path.display(), "loaded abucket configuration");
+    let config = load_or_init_config(&config_file_path)?;
+    info!(config = %config_file_path.display(), "loaded abucket configuration");
     let root_key = env::var("ABUCKET_ROOT_KEY")
         .ok()
         .or_else(|| env::var("ATREE_ROOT_KEY").ok());
@@ -991,7 +991,7 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         config: Arc::new(RwLock::new(config)),
-        db_path,
+        config_file_path,
         root_key,
         cache_dir,
         multipart_dir,
@@ -1209,7 +1209,7 @@ async fn config_handler(
                 Ok(config) => config,
                 Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
             };
-            if let Err(err) = save_config_to_file(&state.db_path, &config) {
+            if let Err(err) = save_config_to_file(&state.config_file_path, &config) {
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
             }
             *state.config.write().await = config.clone();
@@ -1352,7 +1352,7 @@ async fn object_handler(
             let quark = match quark_open_client(
                 quark_config,
                 &path,
-                state.db_path.clone(),
+                state.config_file_path.clone(),
                 state.config.clone(),
                 state.quark_shared.clone(),
             ) {
@@ -1575,7 +1575,7 @@ async fn list_objects(
             let quark = match quark_open_client(
                 quark_config,
                 &path,
-                state.db_path.clone(),
+                state.config_file_path.clone(),
                 state.config.clone(),
                 state.quark_shared.clone(),
             ) {
@@ -3637,7 +3637,7 @@ async fn browser_directory(
     let config = state.config.read().await;
     let Some((remote_key, backend)) = resolve_mount(&config, &index_path).and_then(|mount| {
         backend_from_mount(
-            state.db_path.clone(),
+            state.config_file_path.clone(),
             state.config.clone(),
             state.quark_shared.clone(),
             mount,
@@ -3673,7 +3673,7 @@ async fn browser_directory_index(
                 quark_open_client(
                     quark_config,
                     &path,
-                    state.db_path.clone(),
+                    state.config_file_path.clone(),
                     state.config.clone(),
                     state.quark_shared.clone(),
                 )
@@ -3709,7 +3709,7 @@ async fn find_directory_index(state: &AppState, virtual_path: &str) -> Option<St
     let prefix = virtual_path.trim_matches('/');
     let config = state.config.read().await;
     let (remote_key, backend) = backend_from_mount(
-        state.db_path.clone(),
+        state.config_file_path.clone(),
         state.config.clone(),
         state.quark_shared.clone(),
         resolve_mount(&config, &format!("/{prefix}"))?,
@@ -4315,7 +4315,7 @@ mod tests {
 
     impl Drop for TestState {
         fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.state.db_path);
+            let _ = std::fs::remove_file(&self.state.config_file_path);
             let _ = std::fs::remove_dir_all(&self.state.cache_dir);
             let _ = std::fs::remove_dir_all(&self.state.multipart_dir);
         }
@@ -4381,13 +4381,13 @@ mod tests {
 
     fn test_state() -> TestState {
         let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let db_path = std::env::temp_dir().join(format!(
-            "abucket-test-{}-{}-{}.sqlite",
+        let config_file_path = std::env::temp_dir().join(format!(
+            "abucket-test-{}-{}-{}.yaml",
             std::process::id(),
             chrono_millis(),
             id
         ));
-        let config = load_or_init_config(&db_path).unwrap();
+        let config = load_or_init_config(&config_file_path).unwrap();
         let multipart_dir = std::env::temp_dir().join(format!(
             "abucket-test-multipart-{}-{}-{}",
             std::process::id(),
@@ -4407,7 +4407,7 @@ mod tests {
                 config: Arc::new(RwLock::new(config)),
                 cache_dir,
                 multipart_dir,
-                db_path,
+                config_file_path,
                 root_key: Some("root-test-key".to_string()),
                 quark_shared: Arc::new(QuarkOpenSharedState::default()),
             },
@@ -4470,15 +4470,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_db_is_initialized_with_default_config() {
+    fn empty_config_is_initialized_with_default_config() {
         let root = TestDir::new("abucket-default-config");
-        let db_path = root.join("config.yaml");
+        let config_file_path = root.join("config.yaml");
 
-        let config = load_or_init_config(&db_path).unwrap();
+        let config = load_or_init_config(&config_file_path).unwrap();
 
         assert_eq!(config, ServiceConfig::default());
 
-        let reloaded = load_or_init_config(&db_path).unwrap();
+        let reloaded = load_or_init_config(&config_file_path).unwrap();
         assert_eq!(reloaded, ServiceConfig::default());
     }
 

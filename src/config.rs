@@ -5,7 +5,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{Context, Result, bail};
 use reqwest::Url;
@@ -157,11 +157,7 @@ pub(crate) fn save_config_to_file(config_path: &Path, config: &ServiceConfig) ->
     std::fs::write(&tmp, raw.as_bytes())?;
     #[cfg(unix)]
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let file = options.open(&tmp)?;
+    let file = std::fs::File::open(&tmp)?;
     file.sync_all()?;
     std::fs::rename(&tmp, config_path)
         .with_context(|| format!("failed to replace config {}", config_path.display()))?;

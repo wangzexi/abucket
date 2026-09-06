@@ -4,6 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use anyhow::{Context, Result, bail};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -152,10 +155,11 @@ pub(crate) fn save_config_to_file(config_path: &Path, config: &ServiceConfig) ->
     let raw = serde_yaml::to_string(config)?;
     let tmp = config_path.with_extension("yaml.tmp");
     std::fs::write(&tmp, raw.as_bytes())?;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&tmp)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(&tmp)?;
     file.sync_all()?;
     std::fs::rename(&tmp, config_path)
         .with_context(|| format!("failed to replace config {}", config_path.display()))?;
